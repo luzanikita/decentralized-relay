@@ -158,3 +158,60 @@ describe('WebRTCProvider event mapping', () => {
     expect(provider.synced).toBe(false);
   });
 });
+
+describe('WebRTCProvider computed properties', () => {
+  it('connectionState reflects inner.connected and inner.shouldConnect', () => {
+    const provider = new WebRTCProvider('room', new Y.Doc());
+
+    mockInner.connected = false;
+    mockInner.shouldConnect = false;
+    expect(provider.connectionState).toEqual({ status: 'disconnected', intent: 'disconnected' });
+
+    mockInner.connected = true;
+    mockInner.shouldConnect = true;
+    expect(provider.connectionState).toEqual({ status: 'connected', intent: 'connected' });
+
+    mockInner.connected = false;
+    mockInner.shouldConnect = true;
+    expect(provider.connectionState).toEqual({ status: 'disconnected', intent: 'connected' });
+  });
+
+  it('intent reflects inner.shouldConnect', () => {
+    const provider = new WebRTCProvider('room', new Y.Doc());
+    mockInner.shouldConnect = false;
+    expect(provider.intent).toBe('disconnected');
+    mockInner.shouldConnect = true;
+    expect(provider.intent).toBe('connected');
+  });
+});
+
+describe('WebRTCProvider no-op methods', () => {
+  it('refreshToken returns urlChanged:false and empty newUrl', () => {
+    const provider = new WebRTCProvider('room', new Y.Doc());
+    expect(provider.refreshToken('http://x', 'doc', 'tok', false)).toEqual({
+      urlChanged: false,
+      newUrl: '',
+    });
+  });
+
+  it('hasUrl always returns true', () => {
+    const provider = new WebRTCProvider('room', new Y.Doc());
+    expect(provider.hasUrl('http://anything')).toBe(true);
+    expect(provider.hasUrl('')).toBe(true);
+  });
+
+  it('canReconnect always returns true', () => {
+    const provider = new WebRTCProvider('room', new Y.Doc());
+    expect(provider.canReconnect()).toBe(true);
+  });
+
+  it('_pendingMessages is always empty array', () => {
+    const provider = new WebRTCProvider('room', new Y.Doc());
+    expect(provider._pendingMessages).toEqual([]);
+  });
+
+  it('beforeReconnect is null by default', () => {
+    const provider = new WebRTCProvider('room', new Y.Doc());
+    expect(provider.beforeReconnect).toBeNull();
+  });
+});
