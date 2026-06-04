@@ -1,5 +1,6 @@
 import * as Y from 'yjs';
 import * as awarenessProtocol from 'y-protocols/awareness';
+import { EventEmitter } from 'events';
 import { WebrtcProvider } from 'y-webrtc';
 import {
   ConnectionState,
@@ -14,6 +15,7 @@ export type User = { name: string; color?: string };
 
 export class WebRTCProvider implements IRelayProvider {
   private inner: WebrtcProvider;
+  private emitter = new EventEmitter();
   synced = false;
   beforeReconnect: BeforeReconnect | null = null;
   _pendingMessages: unknown[] = [];
@@ -48,11 +50,11 @@ export class WebRTCProvider implements IRelayProvider {
   }
 
   on(event: string, cb: (...args: any[]) => void): void {
-    this.inner.on(event, cb);
+    this.emitter.on(event, cb);
   }
 
   off(event: string, cb: (...args: any[]) => void): void {
-    this.inner.off(event, cb);
+    this.emitter.off(event, cb);
   }
 
   get connectionState(): ConnectionState {
@@ -84,6 +86,22 @@ export class WebRTCProvider implements IRelayProvider {
   }
 
   private _bindInnerEvents(): void {
-    // placeholder — event binding added in Task 4
+    this.inner.on('status', ({ connected }: { connected: boolean }) => {
+      const intent: ConnectionIntent = this.inner.shouldConnect ? 'connected' : 'disconnected';
+      this.emitter.emit('status', {
+        status: connected ? 'connected' : 'disconnected',
+        intent,
+      });
+      if (!connected) {
+        this.emitter.emit('connection-close');
+      }
+    });
+
+    this.inner.on('synced', (synced: boolean) => {
+      if (synced) {
+        this.synced = true;
+      }
+      this.emitter.emit('synced', synced);
+    });
   }
 }

@@ -104,3 +104,57 @@ describe('WebRTCProvider delegation', () => {
     expect(provider.awareness).toBe(mockInner.awareness);
   });
 });
+
+describe('WebRTCProvider event mapping', () => {
+  it("inner 'status' {connected:true} emits 'status' with status:connected, intent:connected", () => {
+    const provider = new WebRTCProvider('room', new Y.Doc());
+    const handler = jest.fn();
+    provider.on('status', handler);
+
+    mockInner.connected = true;
+    mockInner.shouldConnect = true;
+    mockInner._emitter.emit('status', { connected: true });
+
+    expect(handler).toHaveBeenCalledWith({ status: 'connected', intent: 'connected' });
+  });
+
+  it("inner 'status' {connected:false} emits 'status' with status:disconnected", () => {
+    const provider = new WebRTCProvider('room', new Y.Doc());
+    const statusHandler = jest.fn();
+    provider.on('status', statusHandler);
+
+    mockInner.connected = false;
+    mockInner.shouldConnect = true;
+    mockInner._emitter.emit('status', { connected: false });
+
+    expect(statusHandler).toHaveBeenCalledWith({ status: 'disconnected', intent: 'connected' });
+  });
+
+  it("inner 'status' {connected:false} also emits 'connection-close'", () => {
+    const provider = new WebRTCProvider('room', new Y.Doc());
+    const closeHandler = jest.fn();
+    provider.on('connection-close', closeHandler);
+
+    mockInner._emitter.emit('status', { connected: false });
+
+    expect(closeHandler).toHaveBeenCalledTimes(1);
+  });
+
+  it("inner 'synced' true sets synced flag and emits 'synced' true", () => {
+    const provider = new WebRTCProvider('room', new Y.Doc());
+    const syncHandler = jest.fn();
+    provider.on('synced', syncHandler);
+
+    expect(provider.synced).toBe(false);
+    mockInner._emitter.emit('synced', true);
+
+    expect(provider.synced).toBe(true);
+    expect(syncHandler).toHaveBeenCalledWith(true);
+  });
+
+  it("inner 'synced' false does not set synced flag", () => {
+    const provider = new WebRTCProvider('room', new Y.Doc());
+    mockInner._emitter.emit('synced', false);
+    expect(provider.synced).toBe(false);
+  });
+});
