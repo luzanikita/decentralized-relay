@@ -1,3 +1,9 @@
+# decentralized-relay
+
+> **Fork of [Relay](https://github.com/No-Instructions/Relay) by [System 3](https://system3.md/), used under the MIT License.**
+> Original authors: Daniel Grossmann-Kavanagh and contributors.
+> This fork replaces the centralized y-sweet relay server with WebRTC P2P sync (y-webrtc).
+
 # Relay 🛰️
 
 True **multiplayer mode** for Obsidian. 💃🕺
