@@ -341,57 +341,8 @@ export class HasProvider extends HasLogging {
 		this._deferredDisconnectStatusListener = null;
 	}
 
-	deferDisconnectForPendingMessages(timeoutMs: number = 2000): boolean {
-		const provider = this._provider;
-		if (!provider || provider._pendingMessages.length === 0) {
-			return false;
-		}
-
-		this.clearDeferredDisconnect();
-
-		const finishDisconnect = () => {
-			if (this._provider !== provider) {
-				this.clearDeferredDisconnect();
-				return;
-			}
-			this.disconnect();
-		};
-
-		const queueDisconnect = () => {
-			// YSweetProvider emits "status: connected" before its onopen
-			// handler flushes buffered sync frames. Defer one task so the
-			// pending messages are actually sent before we close the socket.
-			this.timeProvider.setTimeout(finishDisconnect, 0);
-		};
-
-		this._deferredDisconnectStatusListener = (state: ConnectionState) => {
-			if (this._provider !== provider) {
-				this.clearDeferredDisconnect();
-				return;
-			}
-			if (state.status === "connected") {
-				this.clearDeferredDisconnect();
-				queueDisconnect();
-			}
-		};
-		provider.on("status", this._deferredDisconnectStatusListener);
-
-		this._deferredDisconnectTimer = this.timeProvider.setTimeout(() => {
-			if (this._provider !== provider) {
-				this.clearDeferredDisconnect();
-				return;
-			}
-			this.disconnect();
-		}, timeoutMs);
-
-		// Keep the in-flight connection attempt alive. If the socket was
-		// dropped during a brief disconnect window, reconnect so the buffered
-		// sync frames can flush on open.
-		if (provider.connectionState.status !== "connected") {
-			void this.connect();
-		}
-
-		return true;
+	deferDisconnectForPendingMessages(_timeoutMs: number = 2000): boolean {
+		return false;
 	}
 
 	disconnect() {
