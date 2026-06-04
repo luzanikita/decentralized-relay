@@ -527,7 +527,7 @@ export class SharedFolder extends HasProvider {
 	private setupEventSubscriptions() {
 		if (!this._provider || !this.mergeManager) return;
 
-		this._provider.subscribeToEvents(
+		this._provider.subscribeToEvents?.(
 			["document.updated"],
 			(event: EventMessage) => {
 				this.handleDocumentUpdateEvent(event);

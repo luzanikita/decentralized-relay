@@ -1,18 +1,18 @@
 "use strict";
 import * as Y from "yjs";
 import {
-	YSweetProvider,
+	type IRelayProvider,
 	type ConnectionState,
 	type ConnectionIntent,
 } from "./client/provider";
 export type { ConnectionState, ConnectionIntent };
+import { WebRTCProvider } from "./client/webrtc-provider";
 import { User } from "./User";
 import { HasLogging } from "./debug";
 import { LoginManager } from "./LoginManager";
 import { LiveTokenStore } from "./LiveTokenStore";
 import type { ClientToken } from "./client/types";
 import { S3RN, type S3RNType } from "./S3RN";
-import { encodeClientToken } from "./client/types";
 import type { TimeProvider } from "./TimeProvider";
 
 export interface Subscription {
@@ -24,23 +24,12 @@ function makeProvider(
 	clientToken: ClientToken,
 	ydoc: Y.Doc,
 	user: User | undefined,
-	timeProvider: TimeProvider,
-): YSweetProvider {
-	const params = {
-		token: clientToken.token,
-	};
-	const provider = new YSweetProvider(
-		clientToken.url,
+	_timeProvider: TimeProvider,
+): IRelayProvider {
+	const provider = new WebRTCProvider(
 		clientToken.docId,
 		ydoc,
-		{
-			connect: false,
-			params: params,
-			disableBc: true,
-			maxConnectionErrors: 3,
-			readOnly: clientToken.authorization === "read-only",
-			timeProvider,
-		},
+		user ? { name: user.name } : undefined,
 	);
 
 	if (user) {
@@ -76,7 +65,7 @@ function connectionCloseDetails(event: CloseEvent): ConnectionCloseDetails {
 type Listener = (state: ConnectionState) => void;
 
 export class HasProvider extends HasLogging {
-	_provider: YSweetProvider | null = null;
+	_provider: IRelayProvider | null = null;
 	path?: string;
 	private _ydoc: Y.Doc | null = null;
 	clientToken: ClientToken;
@@ -233,11 +222,6 @@ export class HasProvider extends HasLogging {
 		if (this._provider) {
 			this.refreshProvider(this.clientToken);
 		}
-	}
-
-	public get debuggerUrl(): string {
-		const payload = encodeClientToken(this.clientToken);
-		return `https://debugger.y-sweet.dev/?payload=${payload}`;
 	}
 
 	notifyListeners() {

@@ -1266,4 +1266,8 @@ export interface IRelayProvider {
 	canReconnect(): boolean;
 	_pendingMessages: unknown[];
 	beforeReconnect: BeforeReconnect | null;
+	// Optional y-sweet subdoc methods — no-ops on WebRTC provider
+	subscribeToEvents?: (eventTypes: string[], callback: EventCallback) => void;
+	getSubdocQueryDocIds?: SubdocQueryDocIdsProvider | null;
+	onSubdocIndex?: SubdocIndexCallback | null;
 }

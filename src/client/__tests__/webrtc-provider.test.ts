@@ -146,7 +146,7 @@ describe('WebRTCProvider event mapping', () => {
     provider.on('synced', syncHandler);
 
     expect(provider.synced).toBe(false);
-    mockInner._emitter.emit('synced', true);
+    mockInner._emitter.emit('synced', { synced: true });
 
     expect(provider.synced).toBe(true);
     expect(syncHandler).toHaveBeenCalledWith(true);
@@ -154,7 +154,7 @@ describe('WebRTCProvider event mapping', () => {
 
   it("inner 'synced' false does not set synced flag", () => {
     const provider = new WebRTCProvider('room', new Y.Doc());
-    mockInner._emitter.emit('synced', false);
+    mockInner._emitter.emit('synced', { synced: false });
     expect(provider.synced).toBe(false);
   });
 });

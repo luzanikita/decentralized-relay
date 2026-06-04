@@ -2,7 +2,7 @@ import * as Y from 'yjs';
 import * as awarenessProtocol from 'y-protocols/awareness';
 import { EventEmitter } from 'events';
 import { WebrtcProvider } from 'y-webrtc';
-import {
+import type {
   ConnectionState,
   ConnectionIntent,
   IRelayProvider,
@@ -97,7 +97,7 @@ export class WebRTCProvider implements IRelayProvider {
       }
     });
 
-    this.inner.on('synced', (synced: boolean) => {
+    this.inner.on('synced', ({ synced }: { synced: boolean }) => {
       if (synced) {
         this.synced = true;
       }
