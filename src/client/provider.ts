@@ -1245,3 +1245,25 @@ export class YSweetProvider extends Observable<string> {
 	}
 
 }
+
+export interface IRelayProvider {
+	on(event: string, cb: (...args: any[]) => void): void;
+	off(event: string, cb: (...args: any[]) => void): void;
+	connect(): void;
+	disconnect(): void;
+	destroy(): void;
+	awareness: awarenessProtocol.Awareness;
+	connectionState: ConnectionState;
+	synced: boolean;
+	intent: ConnectionIntent;
+	refreshToken(
+		url: string,
+		docId: string,
+		token: string,
+		readOnly: boolean,
+	): { urlChanged: boolean; newUrl: string };
+	hasUrl(url: string): boolean;
+	canReconnect(): boolean;
+	_pendingMessages: unknown[];
+	beforeReconnect: BeforeReconnect | null;
+}
