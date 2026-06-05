@@ -14,12 +14,14 @@ module.exports = {
 		"^src/(.*)$": "<rootDir>/src/$1",
 		"^yjs$": yjsIndex,
 		"^yjs/dist/src/internals$": yjsInternals,
+		"^multiformats/cid$": "<rootDir>/node_modules/multiformats/dist/src/cid.js",
+		"^multiformats/hashes/digest$": "<rootDir>/node_modules/multiformats/dist/src/hashes/digest.js",
 	},
 	testPathIgnorePatterns: ["/__tests__/mocks/", "/__tests__/merge-hsm/testing/", "archive/", ".claude"],
     globals: {
         "BUILD_TYPE": "production",
     },
-	transformIgnorePatterns: ["[\\/]node_modules[\\/](?!(yjs|lib0)[\\/])"],
+	transformIgnorePatterns: ["[\\/]node_modules[\\/](?!(yjs|lib0|multiformats)[\\/])"],
 	transform: {
 		"\\.ts$": [
 			"ts-jest",
