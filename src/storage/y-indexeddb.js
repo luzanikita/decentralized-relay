@@ -1,0 +1,872 @@
+import * as Y from 'yjs'
+import * as idb from 'lib0/indexeddb'
+import { Observable } from 'lib0/observable'
+import { metrics, curryLog } from '../debug'
+
+const idbWarn = curryLog('[IndexeddbPersistence]', 'warn')
+import { OpCapture } from '../merge-hsm/undo'
+
+const customStoreName = 'custom'
+const updatesStoreName = 'updates'
+const historyStoreName = 'history'
+const DB_VERSION = 2
+
+/**
+ * Compare two Uint8Arrays for equality
+ * @param {Uint8Array} a
+ * @param {Uint8Array} b
+ * @returns {boolean}
+ */
+const uint8ArrayEquals = (a, b) => {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
+}
+
+/**
+ * Validate a Yjs update by applying it to a throwaway doc.
+ * Returns null if valid, or the Error if invalid.
+ * @param {Uint8Array} update
+ * @returns {Error|null}
+ */
+const validateUpdate = (update) => {
+  const doc = new Y.Doc()
+  try {
+    Y.applyUpdate(doc, update)
+    return null
+  } catch (e) {
+    return e instanceof Error ? e : new Error(String(e))
+  } finally {
+    doc.destroy()
+  }
+}
+
+// Use a higher threshold on startup to avoid slow initial compaction
+// After sync, use the lower threshold to keep the database lean
+export const STARTUP_TRIM_SIZE = 500
+export const RUNTIME_TRIM_SIZE = 50
+
+/**
+ * @param {IndexeddbPersistence} idbPersistence
+ * @param {function(IDBObjectStore):void} [beforeApplyUpdatesCallback]
+ * @param {function(IDBObjectStore):void} [afterApplyUpdatesCallback]
+ */
+export const fetchUpdates = (idbPersistence, beforeApplyUpdatesCallback = () => {}, afterApplyUpdatesCallback = () => {}) => {
+  const [updatesStore] = idb.transact(/** @type {IDBDatabase} */ (idbPersistence.db), [updatesStoreName]) // , 'readonly')
+  return idb.getAll(updatesStore, idb.createIDBKeyRangeLowerBound(idbPersistence._dbref, false)).then(updates => {
+    if (!idbPersistence._destroyed) {
+      beforeApplyUpdatesCallback(updatesStore)
+      // Validate each update on a throwaway doc BEFORE applying to the real doc.
+      // A corrupted update can partially integrate items (advancing the client clock)
+      // before throwing. If we catch after the fact, the doc has phantom clock entries
+      // that make future remote diffs compute as empty — causing silent data divergence.
+      const validUpdates = updates.filter(val => {
+        const err = validateUpdate(val)
+        if (!err) return true
+        console.error(`[y-indexeddb] Filtering out corrupted update from IDB for ${idbPersistence.name} (${val.byteLength} bytes):`, err)
+        return false
+      })
+      if (validUpdates.length < updates.length) {
+        console.error(`[y-indexeddb] Filtered ${updates.length - validUpdates.length}/${updates.length} corrupted updates from IDB for ${idbPersistence.name}`)
+      }
+      Y.transact(idbPersistence.doc, () => {
+        validUpdates.forEach(val => Y.applyUpdate(idbPersistence.doc, val))
+      }, idbPersistence, false)
+    }
+  })
+    .then(() => idb.getLastKey(updatesStore).then(lastKey => { idbPersistence._dbref = lastKey + 1 }))
+    .then(() => idb.count(updatesStore).then(cnt => {
+      idbPersistence._dbsize = cnt
+      metrics.setDbSize(idbPersistence.name, cnt)
+    }))
+    .then(() => {
+      if (!idbPersistence._destroyed) {
+        afterApplyUpdatesCallback(updatesStore)
+      }
+      return updatesStore
+    })
+}
+
+/**
+ * @param {IndexeddbPersistence} idbPersistence
+ * @param {boolean} forceStore
+ */
+export const storeState = (idbPersistence, forceStore = true) =>
+  fetchUpdates(idbPersistence)
+    .then(updatesStore => {
+      if (forceStore || idbPersistence._dbsize >= RUNTIME_TRIM_SIZE) {
+        const compactedState = Y.encodeStateAsUpdate(idbPersistence.doc)
+        const startTime = performance.now()
+        // Return the promise chain so callers can await the writes
+        return idb.addAutoKey(updatesStore, compactedState)
+          .then(() => idb.del(updatesStore, idb.createIDBKeyRangeUpperBound(idbPersistence._dbref, true)))
+          .then(() => idb.count(updatesStore).then(cnt => {
+            idbPersistence._dbsize = cnt
+            metrics.setDbSize(idbPersistence.name, cnt)
+          }))
+          .then(() => {
+            const durationSeconds = (performance.now() - startTime) / 1000
+            metrics.recordCompaction(idbPersistence.name, durationSeconds)
+          })
+      }
+    })
+
+/**
+ * @param {string} name
+ */
+export const clearDocument = name => idb.deleteDB(name)
+
+/**
+ * @extends Observable<string>
+ */
+export class IndexeddbPersistence extends Observable {
+  /**
+   * @param {string} name
+   * @param {Y.Doc} doc
+   * @param {{ scope: string, trackedOrigins: Set<any>, captureTimeout?: number }|null} [captureOpts] - OpCapture config (null = no capture)
+   * @param {string|null} [migrateFrom] - Old DB name to migrate data from (one-time, then deleted)
+   * @param {import('../TimeProvider').TimeProvider} timeProvider
+   */
+  constructor (name, doc, captureOpts = null, migrateFrom = null, timeProvider) {
+    super()
+    if (!timeProvider) {
+      throw new Error('IndexeddbPersistence requires a TimeProvider')
+    }
+    this.doc = doc
+    this.name = name
+    this.timeProvider = timeProvider
+    this._dbref = 0
+    this._dbsize = 0
+    this._destroyed = false
+    this._captureOpts = captureOpts
+    this._migrateFromName = migrateFrom
+    /**
+     * @type {IDBDatabase|null}
+     */
+    this.db = null
+    this.synced = false
+    this._syncFailed = false
+    this._syncError = null
+    this._serverSynced = undefined
+    this._origin = undefined
+    /**
+     * OpCapture instance managed by this persistence.
+     * Created during the sync lifecycle if captureOpts is provided.
+     * @type {OpCapture|null}
+     */
+    this.opCapture = null
+    // Open IDB with explicit version to support schema migrations.
+    // The 'history' store holds serialized OpCapture entries.
+    this._db = new Promise((resolve, reject) => {
+      const request = indexedDB.open(name, DB_VERSION)
+      request.onupgradeneeded = (event) => {
+        const db = /** @type {IDBDatabase} */ (event.target.result)
+        if (!db.objectStoreNames.contains(updatesStoreName)) {
+          db.createObjectStore(updatesStoreName, { autoIncrement: true })
+        }
+        if (!db.objectStoreNames.contains(customStoreName)) {
+          db.createObjectStore(customStoreName)
+        }
+        if (!db.objectStoreNames.contains(historyStoreName)) {
+          db.createObjectStore(historyStoreName, { autoIncrement: true })
+        }
+      }
+      request.onblocked = () => {
+        idbWarn(`indexedDB.open blocked for ${name}`)
+      }
+      request.onerror = () => reject(request.error || new Error(`indexedDB.open failed for ${name}`))
+      request.onsuccess = () => resolve(request.result)
+    })
+    /**
+     * @type {Promise<IndexeddbPersistence>}
+     */
+    this.whenSynced = new Promise((resolve, reject) => {
+      if (this.synced) {
+        resolve(this)
+        return
+      }
+      if (this._syncFailed) {
+        reject(this._syncError || new Error(`IndexedDB sync failed for ${this.name}`))
+        return
+      }
+      const onSynced = () => {
+        this.off('failed', onFailed)
+        resolve(this)
+      }
+      const onFailed = (err) => {
+        this.off('synced', onSynced)
+        reject(err || this._syncError || new Error(`IndexedDB sync failed for ${this.name}`))
+      }
+      this.on('synced', onSynced)
+      this.on('failed', onFailed)
+    })
+
+    this._db.catch((err) => {
+      this._failSync(err)
+    })
+
+    this._db.then(db => {
+      this.db = db
+
+      const migrationDone = this._migrateFromName
+        ? this._migrateFromOldDb(this._migrateFromName)
+        : Promise.resolve()
+
+      return migrationDone.then(() => {
+      // Capture pending state before loading from IDB
+      /** @type {Uint8Array|null} */
+      let pendingState = null
+      /**
+       * @param {IDBObjectStore} updatesStore
+       */
+      const beforeApplyUpdatesCallback = (updatesStore) => {
+        // Capture any in-memory state before loading from IDB
+        pendingState = Y.encodeStateAsUpdate(doc)
+      }
+      const afterApplyUpdatesCallback = (updatesStore) => {
+        if (this._destroyed) return this
+        // After loading from IDB, check if pending state had anything new
+        if (pendingState && pendingState.length > 2) {
+          const vectorBeforePending = Y.encodeStateVector(doc)
+          Y.applyUpdate(doc, pendingState, this)
+          const vectorAfterPending = Y.encodeStateVector(doc)
+          const changed = !uint8ArrayEquals(vectorBeforePending, vectorAfterPending)
+          // Only write if applying pending state actually changed something
+          if (changed) {
+            idb.addAutoKey(updatesStore, pendingState)
+          }
+        }
+        // 'synced' is emitted after capture init (see below)
+      }
+      fetchUpdates(this, beforeApplyUpdatesCallback, afterApplyUpdatesCallback)
+        .then(() => {
+          if (this._captureOpts && !this._destroyed) {
+            return this._initCapture()
+          }
+        })
+        .then(() => {
+          if (!this._destroyed) {
+            this.synced = true
+            this.emit('synced', [this])
+          }
+        })
+        .catch((err) => {
+          this._failSync(err)
+        })
+      }) // migrationDone
+    })
+    /**
+     * Timeout in ms until data is merged and persisted in idb.
+     */
+    this._storeTimeout = 1000
+    /**
+     * @type {number|null}
+     */
+    this._storeTimeoutId = null
+    /**
+     * Track pending write operations for proper teardown.
+     * @type {Set<Promise<any>>}
+     */
+    this._pendingWrites = new Set()
+    this._compactionRequested = false
+    /**
+     * Track pending compaction operation for proper teardown.
+     * @type {Promise<void>|null}
+     */
+    this._pendingCompaction = null
+    /**
+     * @param {Uint8Array} update
+     * @param {any} origin
+     */
+    this._storeUpdate = (update, origin) => {
+      if (this.db && origin !== this) {
+        const storeErr = validateUpdate(update)
+        if (storeErr) {
+          console.error(`[y-indexeddb] Dropping invalid update for ${this.name} (${update.byteLength} bytes, not persisted):`, storeErr)
+          return
+        }
+        const [updatesStore] = idb.transact(/** @type {IDBDatabase} */ (this.db), [updatesStoreName])
+        const writePromise = idb.addAutoKey(updatesStore, update)
+        this._pendingWrites.add(writePromise)
+        writePromise.finally(() => {
+          this._pendingWrites.delete(writePromise)
+        })
+        ++this._dbsize
+        metrics.setDbSize(this.name, this._dbsize)
+        const trimSize = this.synced ? RUNTIME_TRIM_SIZE : STARTUP_TRIM_SIZE
+        if (this._dbsize >= trimSize) {
+          this._scheduleCompaction()
+        }
+      }
+    }
+    doc.on('update', this._storeUpdate)
+    this.destroy = this.destroy.bind(this)
+    doc.on('destroy', this.destroy)
+  }
+
+  /**
+   * Override once to handle race condition where event might have already fired
+   * @param {string} name
+   * @param {function} f
+   */
+  once (name, f) {
+    if (name === 'synced' && this.synced) {
+      // If already synced, call immediately in next tick
+      this.timeProvider.setTimeout(() => f(this), 0)
+      return this
+    }
+    if (name === 'failed' && this._syncFailed) {
+      this.timeProvider.setTimeout(() => f(this._syncError), 0)
+      return this
+    }
+    return super.once(name, f)
+  }
+
+  _failSync (err) {
+    if (this._destroyed || this._syncFailed) return
+    this._syncFailed = true
+    this._syncError = err instanceof Error ? err : new Error(String(err))
+    idbWarn(`sync failed for ${this.name}:`, this._syncError)
+    this.emit('failed', [this._syncError])
+  }
+
+  /**
+   * Load capture entries from the history object store.
+   * @return {Promise<Array<{k: number, v: any}>>}
+   * @private
+   */
+  async _loadCaptureEntries () {
+    const db = await this._db
+    const [store] = idb.transact(db, [historyStoreName], 'readonly')
+    return idb.getAllKeysValues(store)
+  }
+
+  /**
+   * Initialize OpCapture from IDB and wire storage hooks.
+   * Called from the constructor's sync chain, AFTER fetchUpdates (so items
+   * exist for keepItem restoration) and BEFORE 'synced' fires.
+   * @return {Promise<void>}
+   * @private
+   */
+  async _initCapture () {
+    const saved = await this._loadCaptureEntries()
+    const scope = this.doc.getText(this._captureOpts.scope)
+
+    if (saved.length > 0) {
+      this.opCapture = OpCapture.restore(
+        this.doc, scope, { entries: [] }, this._captureOpts, saved
+      )
+    } else {
+      this.opCapture = new OpCapture(scope, this._captureOpts)
+    }
+
+    // Wire internal persistence hooks
+    this.opCapture._storage = {
+      append: (serialized) => {
+        const p = this._db.then(db => {
+          const [store] = idb.transact(db, [historyStoreName])
+          return idb.addAutoKey(store, serialized)
+        })
+        this._pendingWrites.add(p)
+        p.finally(() => this._pendingWrites.delete(p))
+        return p
+      },
+      update: (key, serialized) => {
+        const p = this._db.then(db => {
+          const [store] = idb.transact(db, [historyStoreName])
+          return idb.put(store, serialized, key)
+        })
+        this._pendingWrites.add(p)
+        p.finally(() => this._pendingWrites.delete(p))
+        return p
+      },
+      remove: (keys) => {
+        if (keys.length === 0) return Promise.resolve()
+        const p = this._db.then(db => {
+          const [store] = idb.transact(db, [historyStoreName])
+          return Promise.all(keys.map(k => idb.del(store, k)))
+        })
+        this._pendingWrites.add(p)
+        p.finally(() => this._pendingWrites.delete(p))
+        return p
+      },
+      clear: () => {
+        const p = this._db.then(db => {
+          const [store] = idb.transact(db, [historyStoreName])
+          return idb.rtop(store.clear())
+        })
+        this._pendingWrites.add(p)
+        p.finally(() => this._pendingWrites.delete(p))
+        return p
+      }
+    }
+  }
+
+  _scheduleCompaction () {
+    this._compactionRequested = true
+    if (this._destroyed) return
+    if (this._storeTimeoutId !== null) {
+      this.timeProvider.clearTimeout(this._storeTimeoutId)
+    }
+    this._storeTimeoutId = this.timeProvider.setTimeout(() => {
+      this._storeTimeoutId = null
+      this._requestCompaction().catch(err => {
+        idbWarn(`compaction failed for ${this.name}:`, err)
+      })
+    }, this._storeTimeout)
+  }
+
+  _requestCompaction () {
+    if (this._pendingCompaction) return this._pendingCompaction
+    this._pendingCompaction = Promise.resolve()
+      .then(async () => {
+        if (!this._compactionRequested || this._destroyed || !this.db) return
+        this._compactionRequested = false
+        while (this._pendingWrites.size > 0) {
+          await Promise.all(Array.from(this._pendingWrites))
+        }
+        if (!this._destroyed && this.db && this._dbsize >= RUNTIME_TRIM_SIZE) {
+          await storeState(this, false)
+        }
+      })
+      .finally(() => {
+        this._pendingCompaction = null
+        if (this._compactionRequested && !this._destroyed) {
+          this._scheduleCompaction()
+        }
+      })
+    return this._pendingCompaction
+  }
+
+  async destroy () {
+    if (this._storeTimeoutId !== null) {
+      this.timeProvider.clearTimeout(this._storeTimeoutId)
+      this._storeTimeoutId = null
+    }
+    this.doc.off('update', this._storeUpdate)
+    this.doc.off('destroy', this.destroy)
+    this._destroyed = true
+    // Destroy OpCapture (releases keepItem holds, no persistence needed)
+    if (this.opCapture) {
+      this.opCapture.destroy()
+      this.opCapture = null
+    }
+    // If indexedDB.open never resolved, `this.db` is null and queued
+    // writes/compaction are chained on `_db` — awaiting them would
+    // hang destroy forever. Close the db if it eventually resolves.
+    if (!this.db) {
+      this._db.then(db => {
+        db.onversionchange = null
+        db.onerror = null
+        db.onabort = null
+        db.onclose = null
+        db.close()
+      }).catch(() => {})
+      return
+    }
+    // Wait for all pending writes to complete before closing
+    while (this._pendingWrites.size > 0) {
+      await Promise.all(this._pendingWrites)
+    }
+    // Wait for any pending compaction to complete before closing
+    if (this._pendingCompaction) {
+      await this._pendingCompaction
+    }
+    // lib0/indexeddb.openDB sets `db.onversionchange = () => db.close()`. The
+    // arrow function captures the surrounding module's lexical scope. Even
+    // after db.close(), Chrome's "Pending activities" tracker keeps the
+    // listener registered and pins the V8 context (and every class defined in
+    // the plugin module with it) until the listener is cleared. Clearing
+    // onversionchange and the other handlers explicitly lets the IDBDatabase
+    // graph go away on the next GC cycle.
+    this.db.onversionchange = null
+    this.db.onerror = null
+    this.db.onabort = null
+    this.db.onclose = null
+    this.db.close()
+    // Clear the lib0/observable _observers map. The whenSynced promise
+    // registers an `on('synced', ...)` handler that only removes its sibling
+    // `failed` handler when it fires — leaving the synced listener attached
+    // for the lifetime of this instance. Each listener is an arrow whose
+    // closure captures Document/SharedFolder lexical scope, so a forgotten
+    // observer pins the entire plugin module across reload.
+    super.destroy()
+  }
+
+  async clearDocumentData () {
+    await this.whenSynced
+
+    if (this._storeTimeoutId !== null) {
+      this.timeProvider.clearTimeout(this._storeTimeoutId)
+      this._storeTimeoutId = null
+    }
+    this._compactionRequested = false
+    while (this._pendingWrites.size > 0) {
+      await Promise.all(this._pendingWrites)
+    }
+    if (this._pendingCompaction) {
+      await this._pendingCompaction
+    }
+    if (!this.db) return
+
+    const storeNames = [updatesStoreName, customStoreName, historyStoreName]
+      .filter(storeName => this.db.objectStoreNames.contains(storeName))
+
+    if (storeNames.length > 0) {
+      await new Promise((resolve, reject) => {
+        const tx = this.db.transaction(storeNames, 'readwrite')
+        for (const storeName of storeNames) {
+          tx.objectStore(storeName).clear()
+        }
+        tx.oncomplete = () => resolve()
+        tx.onerror = () => reject(tx.error || new Error(`Failed to clear ${this.name}`))
+        tx.onabort = () => reject(tx.error || new Error(`Aborted clearing ${this.name}`))
+      })
+    }
+
+    this._dbref = 0
+    this._dbsize = 0
+    this._serverSynced = undefined
+    this._origin = undefined
+  }
+
+  /**
+   * Destroys this instance and removes all data from indexeddb.
+   *
+   * @return {Promise<void>}
+   */
+  clearData () {
+    return this.destroy().then(() => {
+      idb.deleteDB(this.name)
+    })
+  }
+
+  /**
+   * @param {String | number | ArrayBuffer | Date} key
+   * @return {Promise<String | number | ArrayBuffer | Date | any>}
+   */
+  get (key) {
+    return this._db.then(db => {
+      const [custom] = idb.transact(db, [customStoreName], 'readonly')
+      return idb.get(custom, key)
+    })
+  }
+
+  /**
+   * @param {String | number | ArrayBuffer | Date} key
+   * @param {String | number | ArrayBuffer | Date} value
+   * @return {Promise<String | number | ArrayBuffer | Date>}
+   */
+  set (key, value) {
+    const writePromise = this._db.then(db => {
+      const [custom] = idb.transact(db, [customStoreName])
+      return idb.put(custom, value, key)
+    })
+    this._pendingWrites.add(writePromise)
+    writePromise.finally(() => {
+      this._pendingWrites.delete(writePromise)
+    })
+    return writePromise
+  }
+
+  /**
+   * @param {String | number | ArrayBuffer | Date} key
+   * @return {Promise<undefined>}
+   */
+  del (key) {
+    return this._db.then(db => {
+      const [custom] = idb.transact(db, [customStoreName])
+      return idb.del(custom, key)
+    })
+  }
+
+  /**
+   * Check if this database contains meaningful user data.
+   * Returns true if there are any stored updates in IndexedDB.
+   * @return {boolean}
+   */
+  hasUserData () {
+    return this._dbsize > 0
+  }
+
+  /**
+   * One-time migration: copy raw blobs from an old-named IDB into the new DB.
+   * The old DB is left in place — multiple vaults in the same process may share
+   * the same old DB name and each needs to migrate independently.
+   * @param {string} oldName
+   * @returns {Promise<void>}
+   * @private
+   */
+  _migrateFromOldDb (oldName) {
+    // Check if we already migrated (marker in custom store)
+    const [customStore] = idb.transact(this.db, [customStoreName], 'readonly')
+    return idb.get(customStore, 'migratedFrom').then(existing => {
+      if (existing === oldName) return // already migrated
+      return new Promise(resolve => {
+        let finished = false
+        // onupgradeneeded fires iff indexedDB.open had to create a new DB at
+        // v1 (i.e. oldName did not previously exist). We use it as a sentinel
+        // to distinguish "legacy data present" from "nothing to migrate, and
+        // we just auto-created an empty husk we need to clean up".
+        let didNotExist = false
+        const done = () => {
+          if (finished) return
+          finished = true
+          resolve()
+        }
+        const markMigrated = () => {
+          // Record completion in the new DB so subsequent boots skip this
+          // whole path. Failure here is non-fatal — worst case we retry next
+          // boot and converge then.
+          const [writeStore] = idb.transact(this.db, [customStoreName])
+          return idb.put(writeStore, oldName, 'migratedFrom').catch(() => {})
+        }
+        const req = indexedDB.open(oldName)
+        req.onblocked = () => {
+          idbWarn(`migration open blocked for ${oldName}`)
+        }
+        req.onerror = () => done()
+        req.onupgradeneeded = () => {
+          didNotExist = true
+        }
+        req.onsuccess = () => {
+          const oldDb = req.result
+          if (didNotExist) {
+            // We auto-created an empty v1 DB. Drop it and mark migrated so
+            // we don't re-enter this branch on every boot. Concurrent peers
+            // sharing this oldName will each reach the same conclusion
+            // independently; the deleteDatabase attempt races harmlessly.
+            oldDb.close()
+            const delReq = indexedDB.deleteDatabase(oldName)
+            const finish = () => { markMigrated().finally(done) }
+            delReq.onsuccess = finish
+            delReq.onerror = finish
+            delReq.onblocked = () => {
+              idbWarn(`deleteDatabase blocked for ${oldName}`)
+            }
+            return
+          }
+          const storeNames = [updatesStoreName, customStoreName, historyStoreName]
+            .filter(s => oldDb.objectStoreNames.contains(s))
+          if (storeNames.length === 0) {
+            // Old DB exists but has no relevant stores (e.g. a husk from a
+            // prior crashed run). Nothing to copy; record completion so we
+            // stop probing it.
+            oldDb.close()
+            markMigrated().finally(done)
+            return
+          }
+          // Read all entries from each store in the old DB
+          const readTx = oldDb.transaction(storeNames, 'readonly')
+          const reads = storeNames.map(name => {
+            const store = readTx.objectStore(name)
+            return new Promise((res, rej) => {
+              const entries = []
+              const cursor = store.openCursor()
+              cursor.onsuccess = () => {
+                const c = cursor.result
+                if (c) {
+                  entries.push({ key: c.key, value: c.value })
+                  c.continue()
+                } else {
+                  res({ name, entries })
+                }
+              }
+              cursor.onerror = () => rej(cursor.error)
+            })
+          })
+          Promise.all(reads).then(stores => {
+            // Write all entries into the new DB, plus migration marker
+            const writeStoreNames = [customStoreName, ...stores.filter(s => s.entries.length > 0).map(s => s.name)]
+            const unique = [...new Set(writeStoreNames)]
+            const writeTx = this.db.transaction(unique, 'readwrite')
+            writeTx.objectStore(customStoreName).put(oldName, 'migratedFrom')
+            for (const { name, entries } of stores) {
+              if (entries.length === 0) continue
+              const dest = writeTx.objectStore(name)
+              for (const { key, value } of entries) {
+                dest.put(value, key)
+              }
+            }
+            writeTx.oncomplete = () => {
+              oldDb.close()
+              done()
+            }
+            writeTx.onerror = () => {
+              oldDb.close()
+              done()
+            }
+          }).catch(() => {
+            oldDb.close()
+            done()
+          })
+        }
+      })
+    })
+  }
+
+  _hasLiveDoc () {
+    return !!this.doc && this.doc.store != null
+  }
+
+  /**
+   * Server sync state management
+   */
+
+  /**
+   * Mark this document as synced with the server
+   * @return {Promise<any>}
+   */
+  async markServerSynced () {
+    this._serverSynced = true
+    return this.set("serverSync", 1)
+  }
+
+  /**
+   * Get server sync status
+   * @return {Promise<boolean>}
+   */
+  async getServerSynced () {
+    if (this._serverSynced !== undefined) {
+      return this._serverSynced
+    }
+    const serverSync = await this.get("serverSync")
+    this._serverSynced = serverSync === 1
+    return this._serverSynced
+  }
+
+  /**
+   * Check if document has been synced with server (synchronous)
+   * @return {boolean}
+   */
+  get hasServerSync () {
+    return this._serverSynced === true
+  }
+
+  /**
+   * Origin tracking
+   */
+
+  /**
+   * Set the origin of this document
+   * @param {"local" | "remote"} origin
+   * @return {Promise<any>}
+   */
+  async setOrigin (origin) {
+    this._origin = origin
+    return this.set("origin", origin)
+  }
+
+  /**
+   * Get the origin of this document
+   * @return {Promise<"local" | "remote" | undefined>}
+   */
+  async getOrigin () {
+    if (this._origin !== undefined) {
+      return this._origin
+    }
+    this._origin = await this.get("origin")
+    return this._origin
+  }
+
+  /**
+   * Initialize document with content if not already initialized.
+   * Checks origin in one IDB session, calls contentLoader only if needed.
+   * @param {() => Promise<{content: string, hash: string, mtime: number}>} contentLoader
+   * @param {string} [fieldName='contents'] - Y.Text field name
+   * @return {Promise<boolean>} true if initialization happened, false if already initialized
+   */
+  async initializeWithContent (contentLoader, fieldName = 'contents') {
+    await this.whenSynced
+    if (this._destroyed || !this._hasLiveDoc()) return false
+
+    // Check if already enrolled (origin set = previously initialized)
+    const existingOrigin = await this.getOrigin()
+    if (this._destroyed || !this._hasLiveDoc()) return false
+    if (existingOrigin !== undefined) {
+      return false
+    }
+
+    // Also check for user data (belt and suspenders)
+    if (this.hasUserData()) {
+      return false
+    }
+
+    // Not initialized - load content lazily
+    const { content } = await contentLoader()
+
+    // Insert content. The `relay` map carries a single op so every enrolled
+    // doc produces a non-empty state vector — lets the server (and peers)
+    // tell "uploaded" from "never uploaded" for truly-empty content.
+    this.doc.transact(() => {
+      const header = this.doc.getMap('relay')
+      if (!header.has('v')) header.set('v', 0)
+      const ytext = this.doc.getText(fieldName)
+      ytext.insert(0, content)
+    })
+
+    // Mark origin
+    await this.setOrigin('local')
+    if (this._destroyed || !this._hasLiveDoc()) return false
+
+    return true
+  }
+
+  /**
+   * Initialize document from remote CRDT state if not already initialized.
+   * Used for downloaded documents where remoteDoc already has server content.
+   * @param {Uint8Array} update - CRDT update from remoteDoc
+   * @param {any} origin - Origin to use for Y.applyUpdate (must differ from `this` so _storeUpdate persists to IDB)
+   * @return {Promise<boolean>} true if initialization happened, false if already initialized
+   */
+  async initializeFromRemote (update, origin) {
+    await this.whenSynced
+    if (this._destroyed || !this._hasLiveDoc()) return false
+
+    // Check if already initialized (origin set = previously initialized)
+    const existingOrigin = await this.getOrigin()
+    if (this._destroyed || !this._hasLiveDoc()) return false
+    if (existingOrigin !== undefined) {
+      return false
+    }
+
+    // Also check for user data (belt and suspenders)
+    if (this.hasUserData()) {
+      return false
+    }
+
+    // Apply remote CRDT state — origin must differ from `this` so _storeUpdate persists to IDB
+    Y.applyUpdate(this.doc, update, origin)
+
+    // Mark origin
+    await this.setOrigin('remote')
+    if (this._destroyed || !this._hasLiveDoc()) return false
+
+    return true
+  }
+
+  /**
+   * Enhanced readiness detection
+   */
+
+  /**
+   * Check if the document is ready for use
+   * @param {boolean} providerSynced - whether the provider is synced
+   * @return {boolean}
+   */
+  isReady (providerSynced = false) {
+    return this.synced && (providerSynced || this.hasServerSync || this._origin === "local")
+  }
+
+  /**
+   * Check if this document is awaiting server updates
+   * @return {Promise<boolean>}
+   */
+  async awaitingServerUpdates () {
+    const serverSynced = await this.getServerSynced()
+    const origin = await this.getOrigin()
+    return !serverSynced && origin !== "local" && !this.hasUserData()
+  }
+}

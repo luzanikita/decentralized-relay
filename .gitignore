@@ -9,6 +9,8 @@
 node_modules
 
 *.js
+!jest.config.js
+!src/storage/y-indexeddb.js
 
 # Exclude sourcemaps
 *.map
@@ -22,6 +24,9 @@ data.json
 # local archive
 archive/
 /bug-reports/
+
+# test coverage output
+coverage/
 
 # igit
 .igit
@@ -37,7 +42,6 @@ debug-tools/
 .githooks/
 .memory/
 .claude/
-docs/
 infra/
 scripts/
 tickets/
