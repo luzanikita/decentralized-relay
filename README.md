@@ -2,9 +2,188 @@
 
 > **Fork of [Relay](https://github.com/No-Instructions/Relay) by [System 3](https://system3.md/), used under the MIT License.**
 > Original authors: Daniel Grossmann-Kavanagh and contributors.
-> This fork replaces the centralized y-sweet relay server with WebRTC P2P sync (y-webrtc).
 
-# Relay 🛰️
+This fork replaces the centralized y-sweet relay server with peer-to-peer WebRTC sync
+using [y-webrtc](https://github.com/yjs/y-webrtc). Document content never touches a central server.
+The control plane (OAuth, shared folder management) is unchanged.
+
+---
+
+## What changed
+
+### Architecture
+
+**Before (upstream Relay):**
+
+```mermaid
+graph LR
+    A[Obsidian Plugin] --> B[HasProvider]
+    B --> C[YSweetProvider]
+    C -->|WebSocket + auth token| D[y-sweet relay server]
+    D -->|centralized| E[Other peers]
+    D --- F[(S3 storage)]
+```
+
+**After (this fork):**
+
+```mermaid
+graph LR
+    A[Obsidian Plugin] --> B[HasProvider]
+    B --> C[WebRTCProvider]
+    C -->|ICE candidates only| D[signaling.y-webrtc.com]
+    C -->|document data, P2P| E[Other peers]
+    D -.->|stateless, content-blind| E
+```
+
+Document content travels peer-to-peer. The signaling server sees only room names (= doc IDs) and ICE candidates — never document data.
+
+### Provider swap
+
+The core change is a new adapter class that wraps `y-webrtc`'s `WebrtcProvider` behind the same interface that `HasProvider` already expected from `YSweetProvider`.
+
+```mermaid
+classDiagram
+    class IRelayProvider {
+        <<interface>>
+        +on(event, cb)
+        +off(event, cb)
+        +connect()
+        +disconnect()
+        +destroy()
+        +awareness Awareness
+        +connectionState ConnectionState
+        +synced bool
+        +intent ConnectionIntent
+        +refreshToken(...) urlChanged
+        +hasUrl(url) bool
+        +canReconnect() bool
+        +_pendingMessages unknown[]
+        +beforeReconnect BeforeReconnect
+    }
+
+    class YSweetProvider {
+        WebSocket to relay server
+        Server-enforced auth + read-only
+        Subdoc sync
+    }
+
+    class WebRTCProvider {
+        Wraps y-webrtc WebrtcProvider
+        P2P via WebRTC
+        Maps status/synced events
+        Read-only guard via Y.Doc listener
+    }
+
+    IRelayProvider <|.. YSweetProvider : was
+    IRelayProvider <|.. WebRTCProvider : now
+    HasProvider --> IRelayProvider : _provider
+```
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `package.json` | Added `y-webrtc ^10.3.0` |
+| `src/client/provider.ts` | Appended `IRelayProvider` interface (reuses existing types) |
+| `src/client/webrtc-provider.ts` | **New.** `WebRTCProvider` adapter wrapping `WebrtcProvider` |
+| `src/client/__tests__/webrtc-provider.test.ts` | **New.** 22 unit tests (mocked y-webrtc) |
+| `src/HasProvider.ts` | `makeProvider()` constructs `WebRTCProvider`; `_provider` typed as `IRelayProvider`; removed `debuggerUrl`; simplified `deferDisconnectForPendingMessages()` |
+| `src/SharedFolder.ts` | `subscribeToEvents` call made optional (`?.`) for provider compat |
+
+### Behaviour mapping
+
+| YSweetProvider behaviour | WebRTCProvider equivalent |
+|---|---|
+| `status` event → `{ status, intent }` | Inner `status` event remapped from `{ connected }` |
+| `synced` event → `boolean` | Inner `synced` event remapped from `{ synced }` |
+| `connection-close` event | Emitted when inner `status.connected === false` |
+| `refreshToken(url, …)` | No-op — returns `{ urlChanged: false }` |
+| `hasUrl(url)` | Always `true` |
+| `canReconnect()` | Always `true` |
+| `_pendingMessages` | Always `[]` |
+| `readOnly` enforced by server | Console error on local writes (see Limitations) |
+
+---
+
+## Known limitations
+
+### Security / access control
+
+| Limitation | Detail |
+|---|---|
+| **No transport-level auth** | Room name = `clientToken.docId` (non-guessable GUID). Any peer who learns the docId can join. The signaling server is public and content-blind. |
+| **Read-only not enforced** | WebRTC is symmetric — there is no server to reject writes from read-only clients. `WebRTCProvider` logs a `console.error` when a local write occurs on a read-only token. Full enforcement requires a gated signaling server. |
+| **No encryption** | y-webrtc supports a `password` option (AES-CBC) that is not yet wired up. Until then, informal privacy depends entirely on docId non-guessability. |
+
+### Protocol gaps
+
+| Limitation | Detail |
+|---|---|
+| **No offline persistence** | Peers who disconnect miss updates. There is no persistent store; reconnecting peers must re-sync from an online peer. |
+| **Subdoc sync disabled** | `subscribeToEvents`, `getSubdocQueryDocIds`, `onSubdocIndex` are y-sweet–specific. `WebRTCProvider` exposes them as optional no-ops. Subdoc indexing does not work. |
+| **No `connection-error` on ICE failure** | y-webrtc does not surface ICE negotiation failures as an event. |
+| **Signaling still centralised** | `wss://signaling.y-webrtc.com` is a public server run by the y-webrtc maintainer. It is stateless and content-blind but is still a single point of failure. |
+
+---
+
+## Roadmap
+
+```mermaid
+gantt
+    title decentralized-relay phases
+    dateFormat YYYY-MM
+    axisFormat %b %Y
+
+    section Phase 1 — WebRTC sync (done)
+    IRelayProvider interface       :done, 2026-06, 1d
+    WebRTCProvider adapter         :done, 2026-06, 1d
+    HasProvider swap               :done, 2026-06, 1d
+    Read-only guard                :done, 2026-06, 1d
+
+    section Phase 2 — Persistence
+    Polkadot Bulletin Chain store  :2026-07, 30d
+    Offline catch-up on reconnect  :2026-07, 14d
+
+    section Phase 3 — Private signaling
+    Self-hosted signaling server   :2026-08, 21d
+    Token-gated room admission     :2026-08, 14d
+    Read-only enforcement          :2026-08, 7d
+
+    section Phase 4 — Control plane
+    Replace OAuth / control plane  :2026-09, 30d
+    End-to-end encryption (password option) :2026-09, 14d
+```
+
+### Phase 2 — Persistence (Polkadot Bulletin Chain)
+
+Replace the S3 attachment store and provider sync state with the [Polkadot Bulletin Chain](https://github.com/paritytech/polkadot-bulletin-chain). Peers who reconnect after being offline can catch up from the chain rather than requiring a live peer.
+
+### Phase 3 — Private signaling
+
+Replace `wss://signaling.y-webrtc.com` with a self-hosted signaling server that:
+- Validates `clientToken.token` before admitting a peer to a room
+- Rejects write-intent connections from read-only tokens
+- Provides `connection-error` events on ICE failure
+
+### Phase 4 — Control plane
+
+Replace the System 3 OAuth / control plane with a decentralised identity and permissioning layer. At this point `clientToken.token` and `clientToken.url` can be fully removed.
+
+---
+
+## Development
+
+```bash
+npm install
+npm run build   # tsc + esbuild (develop profile)
+npm test        # jest unit tests (22 tests)
+```
+
+The encrypted test files copied from the upstream repo (`__tests__/**` except `src/client/__tests__/`) require the upstream git-crypt key and cannot be run in this fork without it.
+
+---
+
+# Relay 🛰️ (original README)
 
 True **multiplayer mode** for Obsidian. 💃🕺
 
