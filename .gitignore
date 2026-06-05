@@ -42,6 +42,7 @@ debug-tools/
 .githooks/
 .memory/
 .claude/
+docs/
 infra/
 scripts/
 tickets/
