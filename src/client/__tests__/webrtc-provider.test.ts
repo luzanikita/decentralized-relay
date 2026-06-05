@@ -215,3 +215,40 @@ describe('WebRTCProvider no-op methods', () => {
     expect(provider.beforeReconnect).toBeNull();
   });
 });
+
+describe('WebRTCProvider read-only guard', () => {
+  it('logs an error when a local write occurs on a read-only doc', () => {
+    const doc = new Y.Doc();
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    new WebRTCProvider('room', doc, undefined, { readOnly: true });
+
+    // Simulate a local write (origin === null)
+    doc.emit('update', [new Uint8Array(), null]);
+
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('read-only'));
+    errorSpy.mockRestore();
+  });
+
+  it('does not log when origin is non-null (remote update)', () => {
+    const doc = new Y.Doc();
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    new WebRTCProvider('room', doc, undefined, { readOnly: true });
+
+    // Simulate a remote update (origin === provider instance)
+    doc.emit('update', [new Uint8Array(), {}]);
+
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it('does not register the update listener when not read-only', () => {
+    const doc = new Y.Doc();
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    new WebRTCProvider('room', doc);
+
+    doc.emit('update', [new Uint8Array(), null]);
+
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+});

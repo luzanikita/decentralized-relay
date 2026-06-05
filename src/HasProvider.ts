@@ -30,6 +30,7 @@ function makeProvider(
 		clientToken.docId,
 		ydoc,
 		user ? { name: user.name } : undefined,
+		{ readOnly: clientToken.authorization === 'read-only' },
 	);
 
 	if (user) {

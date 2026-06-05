@@ -24,11 +24,23 @@ export class WebRTCProvider implements IRelayProvider {
     docId: string,
     ydoc: Y.Doc,
     _user?: User,
-    options?: { signalingUrls?: string[] },
+    options?: { signalingUrls?: string[]; readOnly?: boolean },
   ) {
     this.inner = new WebrtcProvider(docId, ydoc, {
       signaling: options?.signalingUrls ?? DEFAULT_SIGNALING,
     });
+    if (options?.readOnly) {
+      // WebRTC cannot enforce read-only at the transport layer. Log an error
+      // if the local application writes to the doc so the violation is visible.
+      ydoc.on('update', (_update: Uint8Array, origin: unknown) => {
+        if (origin === null) {
+          console.error(
+            '[WebRTCProvider] Local write on a read-only document — ' +
+            'WebRTC cannot enforce read-only. Upgrade to a gated signaling server.',
+          );
+        }
+      });
+    }
     this._bindInnerEvents();
   }
 
