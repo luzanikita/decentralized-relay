@@ -161,7 +161,7 @@ export default class Live extends Plugin {
 	public loginSettings!: NamespacedSettings<LoginSettings>;
 	public endpointSettings!: NamespacedSettings<EndpointSettings>;
 	public bulletinClient: BulletinClient | null = null;
-	private bulletinSettings!: NamespacedSettings<BulletinSettings>;
+	public bulletinSettings!: NamespacedSettings<BulletinSettings>;
 	debug!: (...args: unknown[]) => void;
 	log!: (...args: unknown[]) => void;
 	warn!: (...args: unknown[]) => void;
