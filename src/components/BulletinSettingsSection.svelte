@@ -21,6 +21,20 @@
       plugin.bulletinClient = new BulletinClient(plugin.bulletinSettings.get());
     }
   }
+
+  function handleSignalingUrlsChange(e: Event) {
+    settings.signalingUrls = (e.target as HTMLTextAreaElement).value
+      .split('\n')
+      .map((u) => u.trim())
+      .filter((u) => u.length > 0);
+    save();
+  }
+
+  function handleFallbackTimeoutChange(e: Event) {
+    settings.signalingFallbackTimeoutMs =
+      Math.max(0, parseInt((e.target as HTMLInputElement).value, 10) || 0) * 1000;
+    save();
+  }
 </script>
 
 <SettingItemHeading name="Bulletin Chain (Experimental)" />
@@ -86,3 +100,32 @@
     on:change={save}
   />
 </SettingItem>
+
+<SettingItem
+  name="Signaling servers"
+  description="WebSocket URLs for peer discovery (one per line). Used when peers connect to the same document."
+>
+  <textarea
+    class="text"
+    rows="3"
+    style="width: 100%; font-family: monospace; font-size: 12px;"
+    on:change={handleSignalingUrlsChange}
+  >{settings.signalingUrls.join('\n')}</textarea>
+</SettingItem>
+
+{#if settings.bulletinEnabled}
+<SettingItem
+  name="Signaling fallback timeout (seconds)"
+  description="Seconds to wait for a peer via public signaling before falling back to Bulletin Chain. 0 = disabled."
+>
+  <input
+    type="number"
+    class="text"
+    min="0"
+    max="60"
+    style="width: 60px;"
+    value={Math.round(settings.signalingFallbackTimeoutMs / 1000)}
+    on:change={handleFallbackTimeoutChange}
+  />
+</SettingItem>
+{/if}
