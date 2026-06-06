@@ -31,11 +31,15 @@ graph LR
     A[Obsidian Plugin] --> B[HasProvider]
     B --> C[WebRTCProvider]
     C -->|ICE candidates only| D[signaling.y-webrtc.com]
-    C -->|document data, P2P| E[Other peers]
+    C -->|document data + CID gossip| E[Other peers]
     D -.->|stateless, content-blind| E
+    B -.->|optional| F[BulletinCheckpoint]
+    F -->|snapshot every 50 edits| G[BulletinClient]
+    G -->|PAPI tx| H[bulletin-westend]
+    G -.->|fetch CID on open| I[IPFS gateway]
 ```
 
-Document content travels peer-to-peer. The signaling server sees only room names (= doc IDs) and ICE candidates — never document data.
+Document content travels peer-to-peer. The signaling server sees only room names (= doc IDs) and ICE candidates — never document data. The dashed Bulletin Chain path is optional and disabled by default.
 
 ### Provider swap
 
@@ -74,9 +78,27 @@ classDiagram
         Read-only guard via Y.Doc listener
     }
 
+    class BulletinClient {
+        +settings BulletinSettings
+        +connect() Promise~void~
+        +store(data) Promise~string~ CID
+        +fetch(cid) Promise~Uint8Array~
+        +destroy() void
+    }
+
+    class BulletinCheckpoint {
+        -_updateCount number
+        +fetchAndApply() Promise~void~
+        +checkpoint() Promise~void~
+        +destroy() void
+    }
+
     IRelayProvider <|.. YSweetProvider : was
     IRelayProvider <|.. WebRTCProvider : now
     HasProvider --> IRelayProvider : _provider
+    SharedFolder o-- BulletinClient : bulletinClient
+    Document o-- BulletinCheckpoint : _bulletinCheckpoint
+    BulletinCheckpoint --> BulletinClient : store / fetch
 ```
 
 ### Files changed
@@ -176,6 +198,35 @@ gantt
 ### Phase 2 — Persistence (Polkadot Bulletin Chain) ✓ done
 
 The optional Bulletin Chain backup snapshots Yjs document state to the [Polkadot Bulletin Chain](https://github.com/paritytech/polkadot-bulletin-chain) testnet (bulletin-westend). Every 50 edits, and on document close, a snapshot is written to the chain and its CID is distributed to peers via a `_bulletin` Y.Map inside the shared document. On open, `fetchAndApply()` retrieves the last known snapshot and merges it before WebRTC connects — giving reconnecting peers a starting point even when no live peer is available.
+
+```mermaid
+sequenceDiagram
+    participant Doc as Document (Yjs)
+    participant CP as BulletinCheckpoint
+    participant BC as BulletinClient
+    participant Chain as bulletin-westend
+    participant IPFS as IPFS gateway
+    participant Peer as Remote peer
+
+    Note over Doc,Peer: Checkpoint path (every 50 edits / on close)
+    Doc->>CP: update event (50th)
+    CP->>BC: store(encodeStateAsUpdate)
+    BC->>Chain: TransactionStorage.store tx
+    Chain-->>BC: txBestBlocksState (found)
+    BC-->>CP: CID string
+    CP->>Doc: _bulletin.set("latestCid", CID)
+    Doc->>Peer: CID gossiped via WebRTC (_bulletin map)
+
+    Note over Doc,Peer: Recovery path (on open, no live peer)
+    Doc->>CP: ensureRemoteDoc → fetchAndApply()
+    CP->>Doc: read _bulletin.latestCid
+    CP->>BC: fetch(CID)
+    BC->>IPFS: GET /ipfs/{CID}
+    IPFS-->>BC: snapshot bytes
+    BC->>BC: verify blake2b-256 hash
+    BC-->>CP: Uint8Array
+    CP->>Doc: Y.applyUpdate(snapshot)
+```
 
 **Remaining gaps:** Account authorization on the testnet faucet is not automated; the keyfile password is stored in `data.json` plaintext; the final checkpoint on close is best-effort (fire-and-forget over WebSocket).
 
