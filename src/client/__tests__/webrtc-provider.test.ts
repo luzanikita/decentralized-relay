@@ -67,16 +67,38 @@ describe('WebRTCProvider constructor', () => {
     );
   });
 
-  it('uses custom signaling URLs when provided', () => {
+  it('uses URLs from a provided ISignalingTransport', () => {
     const doc = new Y.Doc();
-    new WebRTCProvider('doc-abc-123', doc, undefined, {
-      signalingUrls: ['wss://custom.example.com'],
-    });
+    const transport = { signalingUrls: ['wss://custom.example.com'], destroy: jest.fn() };
+    new WebRTCProvider('doc-abc-123', doc, undefined, { transport });
     expect(MockWebrtcProvider).toHaveBeenCalledWith(
       'doc-abc-123',
       doc,
       expect.objectContaining({ signaling: ['wss://custom.example.com'] }),
     );
+  });
+});
+
+describe('WebRTCProvider transport.onPeerConnected', () => {
+  it('calls transport.onPeerConnected() when synced fires true', () => {
+    const doc = new Y.Doc();
+    const transport = {
+      signalingUrls: ['wss://a.example.com'],
+      destroy: jest.fn(),
+      onPeerConnected: jest.fn(),
+    };
+    new WebRTCProvider('room', doc, undefined, { transport });
+
+    mockInner._emitter.emit('synced', { synced: true });
+
+    expect(transport.onPeerConnected).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not throw when transport has no onPeerConnected', () => {
+    const doc = new Y.Doc();
+    const transport = { signalingUrls: ['wss://a.example.com'], destroy: jest.fn() };
+    new WebRTCProvider('room', doc, undefined, { transport });
+    expect(() => mockInner._emitter.emit('synced', { synced: true })).not.toThrow();
   });
 });
 
