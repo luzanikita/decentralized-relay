@@ -14,6 +14,7 @@ jest.mock('polkadot-api/ws', () => ({
 jest.mock('@polkadot/keyring', () => ({
   Keyring: jest.fn().mockImplementation(() => ({
     addFromJson: jest.fn().mockReturnValue({
+      address: '5GTestAddress',
       publicKey: new Uint8Array(32).fill(1),
       sign: jest.fn().mockReturnValue(new Uint8Array(64)),
       decipher: jest.fn(),
@@ -60,6 +61,8 @@ const SETTINGS: BulletinSettings = {
   bulletinKeyfilePath: '/tmp/test.json',
   bulletinKeyfilePassword: 'testpass',
   bulletinIpfsGateway: 'https://ipfs.io/ipfs/',
+  signalingUrls: ['wss://signaling.y-webrtc.com'],
+  signalingFallbackTimeoutMs: 8000,
 };
 
 describe('BulletinClient', () => {
@@ -119,6 +122,103 @@ describe('BulletinClient', () => {
     global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 404 }) as any;
     const client = new BulletinClient(SETTINGS);
     await expect(client.fetch('bafybadcid')).rejects.toThrow('IPFS fetch failed: 404');
+    client.destroy();
+  });
+});
+
+describe('BulletinClient.accountId', () => {
+  test('returns SS58 address after connect()', async () => {
+    const client = new BulletinClient(SETTINGS);
+    await client.connect();
+    expect(typeof client.accountId).toBe('string');
+    expect(client.accountId.length).toBeGreaterThan(0);
+    client.destroy();
+  });
+
+  test('throws before connect()', () => {
+    const client = new BulletinClient(SETTINGS);
+    expect(() => client.accountId).toThrow('Not connected');
+  });
+});
+
+describe('BulletinClient.subscribeToStoredCids()', () => {
+  const mockBestBlocksSubscribe = jest.fn();
+  const mockGetValue = jest.fn();
+
+  beforeEach(() => {
+    const { createClient } = require('polkadot-api');
+    createClient.mockReturnValue({
+      getTypedApi: mockGetTypedApi,
+      destroy: mockPapiDestroy,
+      bestBlocks$: { subscribe: mockBestBlocksSubscribe },
+    });
+    mockGetTypedApi.mockReturnValue({
+      tx: { TransactionStorage: mockTxTransactionStorage },
+      query: {
+        System: {
+          Events: { getValue: mockGetValue },
+        },
+      },
+    });
+    mockBestBlocksSubscribe.mockReturnValue({ unsubscribe: jest.fn() });
+  });
+
+  test('calls cb with cid from TransactionStorage.Stored events', async () => {
+    const storedEvent = {
+      event: {
+        type: 'TransactionStorage',
+        value: { type: 'Stored', value: { cid: 'bafytest123' } },
+      },
+    };
+    mockGetValue.mockResolvedValue([storedEvent]);
+    mockBestBlocksSubscribe.mockImplementation((handler: any) => {
+      handler([{ hash: '0xabc' }]);
+      return { unsubscribe: jest.fn() };
+    });
+
+    const client = new BulletinClient(SETTINGS);
+    await client.connect();
+
+    const received: string[] = [];
+    client.subscribeToStoredCids((cid) => received.push(cid));
+
+    await new Promise((r) => setTimeout(r, 0));
+    expect(received).toContain('bafytest123');
+    client.destroy();
+  });
+
+  test('ignores non-Stored events', async () => {
+    const otherEvent = {
+      event: { type: 'System', value: { type: 'Remarked', value: {} } },
+    };
+    mockGetValue.mockResolvedValue([otherEvent]);
+    mockBestBlocksSubscribe.mockImplementation((handler: any) => {
+      handler([{ hash: '0xabc' }]);
+      return { unsubscribe: jest.fn() };
+    });
+
+    const client = new BulletinClient(SETTINGS);
+    await client.connect();
+
+    const received: string[] = [];
+    client.subscribeToStoredCids((cid) => received.push(cid));
+
+    await new Promise((r) => setTimeout(r, 0));
+    expect(received).toHaveLength(0);
+    client.destroy();
+  });
+
+  test('unsubscribe function stops block watching', async () => {
+    const unsub = jest.fn();
+    mockBestBlocksSubscribe.mockReturnValue({ unsubscribe: unsub });
+    mockGetValue.mockResolvedValue([]);
+
+    const client = new BulletinClient(SETTINGS);
+    await client.connect();
+
+    const stop = client.subscribeToStoredCids(jest.fn());
+    stop();
+    expect(unsub).toHaveBeenCalledTimes(1);
     client.destroy();
   });
 });

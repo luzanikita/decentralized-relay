@@ -20,6 +20,7 @@ export class BulletinClient {
   private _typedApi: any = null;
   private _signer: any = null;
   private _connectPromise: Promise<void> | null = null;
+  private _accountId: string | null = null;
 
   constructor(readonly settings: BulletinSettings) {}
 
@@ -41,6 +42,7 @@ export class BulletinClient {
       const keyring = new Keyring({ type: 'sr25519' });
       const pair = keyring.addFromJson(keyfileJson);
       (pair as any).decipher(this.settings.bulletinKeyfilePassword);
+      this._accountId = pair.address;
 
       this._signer = getPolkadotSigner(
         pair.publicKey,
@@ -117,6 +119,34 @@ export class BulletinClient {
     return bytes;
   }
 
+  get accountId(): string {
+    if (!this._accountId) throw new Error('[BulletinClient] Not connected');
+    return this._accountId;
+  }
+
+  subscribeToStoredCids(cb: (cid: string) => void): () => void {
+    const sub = (this._papiClient as any).bestBlocks$.subscribe(
+      async (blocks: Array<{ hash: string }>) => {
+        const block = blocks[0];
+        if (!block) return;
+        try {
+          const events: any[] = await this._typedApi.query.System.Events.getValue({
+            at: block.hash,
+          });
+          for (const record of events) {
+            const ev = record?.event;
+            if (ev?.type === 'TransactionStorage' && ev?.value?.type === 'Stored') {
+              cb(ev.value.value.cid as string);
+            }
+          }
+        } catch {
+          // non-fatal: skip block if events cannot be read
+        }
+      },
+    );
+    return () => sub.unsubscribe();
+  }
+
   destroy(): void {
     if (this._papiClient) {
       this._papiClient.destroy();
@@ -126,5 +156,6 @@ export class BulletinClient {
     this._signer = null;
     this._state = 'idle';
     this._connectPromise = null;
+    this._accountId = null;
   }
 }
