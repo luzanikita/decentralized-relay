@@ -30,16 +30,21 @@ graph LR
 graph LR
     A[Obsidian Plugin] --> B[HasProvider]
     B --> C[WebRTCProvider]
-    C -->|ICE candidates only| D[signaling.y-webrtc.com]
+    B --> T[ResilientSignalingTransport]
+    T -->|primary| D[signaling.y-webrtc.com]
+    T -->|fallback after 8s| BST[BulletinSignalingTransport]
+    BST -->|local bridge| LWS[ws://127.0.0.1:PORT]
+    C -->|ICE candidates via transport.signalingUrls| D
     C -->|document data + CID gossip| E[Other peers]
     D -.->|stateless, content-blind| E
     B -.->|optional| F[BulletinCheckpoint]
     F -->|snapshot every 50 edits| G[BulletinClient]
     G -->|PAPI tx| H[bulletin-westend]
     G -.->|fetch CID on open| I[IPFS gateway]
+    BST --> G
 ```
 
-Document content travels peer-to-peer. The signaling server sees only room names (= doc IDs) and ICE candidates — never document data. The dashed Bulletin Chain path is optional and disabled by default.
+Document content travels peer-to-peer. The signaling server sees only room names (= doc IDs) and ICE candidates — never document data. `ResilientSignalingTransport` tries the public server first; if no peer connects within 8 seconds it switches to a local WebSocket bridge backed by the Bulletin Chain. All signaling paths are optional and disabled by default without a configured Bulletin Chain keypair.
 
 ### Provider swap
 
@@ -65,24 +70,48 @@ classDiagram
         +beforeReconnect BeforeReconnect
     }
 
-    class YSweetProvider {
-        WebSocket to relay server
-        Server-enforced auth + read-only
-        Subdoc sync
+    class ISignalingTransport {
+        <<interface>>
+        +signalingUrls string[]
+        +destroy() void
+        +onPeerConnected?() void
+    }
+
+    class PublicSignalingTransport {
+        Thin wrapper around a URL list
+        no-op destroy
+    }
+
+    class BulletinSignalingTransport {
+        http.Server + WebSocketServer on 127.0.0.1
+        Bridges y-webrtc protocol to chain store/fetch
+        Drops awareness messages
+        Self-dedup on inbound envelopes
+        +create(client) Promise
+    }
+
+    class ResilientSignalingTransport {
+        Primary: PublicSignalingTransport
+        Fallback: BulletinSignalingTransport
+        Timer: signalingFallbackTimeoutMs
+        +onPeerConnected() cancels timer
     }
 
     class WebRTCProvider {
         Wraps y-webrtc WebrtcProvider
         P2P via WebRTC
         Maps status/synced events
+        Calls transport.onPeerConnected on sync
         Read-only guard via Y.Doc listener
     }
 
     class BulletinClient {
         +settings BulletinSettings
+        +accountId string
         +connect() Promise~void~
         +store(data) Promise~string~ CID
         +fetch(cid) Promise~Uint8Array~
+        +subscribeToStoredCids(cb) unsubscribe
         +destroy() void
     }
 
@@ -93,12 +122,19 @@ classDiagram
         +destroy() void
     }
 
-    IRelayProvider <|.. YSweetProvider : was
+    ISignalingTransport <|.. PublicSignalingTransport
+    ISignalingTransport <|.. BulletinSignalingTransport
+    ISignalingTransport <|.. ResilientSignalingTransport
+    ResilientSignalingTransport --> PublicSignalingTransport : primary
+    ResilientSignalingTransport --> BulletinSignalingTransport : fallback
     IRelayProvider <|.. WebRTCProvider : now
     HasProvider --> IRelayProvider : _provider
+    HasProvider --> ISignalingTransport : _signalingTransport
+    WebRTCProvider --> ISignalingTransport : _transport
     SharedFolder o-- BulletinClient : bulletinClient
     Document o-- BulletinCheckpoint : _bulletinCheckpoint
     BulletinCheckpoint --> BulletinClient : store / fetch
+    BulletinSignalingTransport --> BulletinClient : store / fetch / subscribe
 ```
 
 ### Files changed
@@ -131,6 +167,27 @@ classDiagram
 | `src/components/BulletinSettingsSection.svelte` | **New.** Settings UI: enable toggle, RPC URL, keyfile path, password, IPFS gateway |
 | `src/components/PluginSettings.svelte` | Added `<BulletinSettingsSection>` to settings panel |
 
+**Phase 3 — Modular resilient signaling:**
+
+| File | Change |
+|---|---|
+| `package.json` | Added `ws` + `@types/ws` for the local signaling bridge server |
+| `src/bulletin/types.ts` | Added `signalingUrls: string[]` and `signalingFallbackTimeoutMs: number` to `BulletinSettings` |
+| `src/bulletin/BulletinClient.ts` | Added `accountId` getter (SS58 address) and `subscribeToStoredCids(cb)` (block-event stream) |
+| `src/bulletin/__tests__/bulletin-client.test.ts` | +5 tests for new `BulletinClient` methods (total: 10) |
+| `src/signaling/ISignalingTransport.ts` | **New.** Interface: `signalingUrls`, `destroy()`, optional `onPeerConnected()` |
+| `src/signaling/PublicSignalingTransport.ts` | **New.** Thin wrapper around a URL list; no-op destroy |
+| `src/signaling/BulletinSignalingTransport.ts` | **New.** Spawns a local `http.Server` + `WebSocketServer`; bridges y-webrtc signaling to chain `store`/`fetch`; filters awareness messages and deduplicates own-account envelopes |
+| `src/signaling/ResilientSignalingTransport.ts` | **New.** Starts with `PublicSignalingTransport`; starts a timer on construction; fires `onFallback(BulletinSignalingTransport)` if no peer connects in time; `onPeerConnected()` cancels the timer |
+| `src/signaling/__tests__/public-signaling.test.ts` | **New.** 5 tests |
+| `src/signaling/__tests__/bulletin-signaling.test.ts` | **New.** 8 tests |
+| `src/signaling/__tests__/resilient-signaling.test.ts` | **New.** 6 tests |
+| `src/client/webrtc-provider.ts` | Accepts `transport?: ISignalingTransport` option; calls `transport.onPeerConnected?.()` on first sync; `destroy()` also calls `transport.destroy()` |
+| `src/client/__tests__/webrtc-provider.test.ts` | +2 tests for transport option and `onPeerConnected` (total: 24) |
+| `src/HasProvider.ts` | Added `_buildSignalingTransport()` (returns `PublicSignalingTransport`); `_handleSignalingFallback()` (swaps provider); threads transport through `ensureRemoteDoc()` |
+| `src/Document.ts` | Overrides `_buildSignalingTransport()` — returns `ResilientSignalingTransport` when `bulletinClient` is available |
+| `src/components/BulletinSettingsSection.svelte` | Added signaling servers textarea and fallback timeout number input |
+
 ### Behaviour mapping
 
 | YSweetProvider behaviour | WebRTCProvider equivalent |
@@ -160,10 +217,10 @@ classDiagram
 
 | Limitation | Detail |
 |---|---|
-| **Offline persistence (experimental)** | The optional Bulletin Chain backup (disabled by default) snapshots documents to the Polkadot Bulletin Chain testnet. Reconnecting peers can catch up from the chain when no live peer is available. Requires a funded sr25519 keypair on bulletin-westend and a configured RPC URL. See Settings → Bulletin Chain. |
+| **Offline persistence + resilient signaling (experimental)** | The optional Bulletin Chain features (disabled by default) include document snapshots and a signaling fallback. Both require a funded sr25519 keypair on bulletin-westend and a configured RPC URL. See Settings → Bulletin Chain. |
 | **Subdoc sync disabled** | `subscribeToEvents`, `getSubdocQueryDocIds`, `onSubdocIndex` are y-sweet–specific. `WebRTCProvider` exposes them as optional no-ops. Subdoc indexing does not work. |
 | **No `connection-error` on ICE failure** | y-webrtc does not surface ICE negotiation failures as an event. |
-| **Signaling still centralised** | `wss://signaling.y-webrtc.com` is a public server run by the y-webrtc maintainer. It is stateless and content-blind but is still a single point of failure. |
+| **Signaling has a decentralised fallback** | `wss://signaling.y-webrtc.com` is tried first. If no peer connects within `signalingFallbackTimeoutMs` (default 8 s) and a Bulletin Chain keypair is configured, signaling falls back to `BulletinSignalingTransport` — a local WebSocket server that stores ICE signals on the bulletin-westend chain and reads them back via block-event subscription. No self-hosting required, but the fallback requires a funded keypair. |
 
 ---
 
@@ -185,12 +242,19 @@ gantt
     Polkadot Bulletin Chain store  :done, 2026-06, 1d
     Offline catch-up on reconnect  :done, 2026-06, 1d
 
-    section Phase 3 — Private signaling
+    section Phase 3 — Resilient signaling (done)
+    ISignalingTransport abstraction    :done, 2026-06, 1d
+    PublicSignalingTransport           :done, 2026-06, 1d
+    BulletinSignalingTransport (local bridge) :done, 2026-06, 1d
+    ResilientSignalingTransport (timer/fallback) :done, 2026-06, 1d
+    Settings UI for signaling URLs     :done, 2026-06, 1d
+
+    section Phase 4 — Private signaling
     Self-hosted signaling server   :2026-08, 21d
     Token-gated room admission     :2026-08, 14d
     Read-only enforcement          :2026-08, 7d
 
-    section Phase 4 — Control plane
+    section Phase 5 — Control plane
     Replace OAuth / control plane  :2026-09, 30d
     End-to-end encryption (password option) :2026-09, 14d
 ```
@@ -230,14 +294,46 @@ sequenceDiagram
 
 **Remaining gaps:** Account authorization on the testnet faucet is not automated; the keyfile password is stored in `data.json` plaintext; the final checkpoint on close is best-effort (fire-and-forget over WebSocket).
 
-### Phase 3 — Private signaling
+### Phase 3 — Modular resilient signaling ✓ done
 
-Replace `wss://signaling.y-webrtc.com` with a self-hosted signaling server that:
-- Validates `clientToken.token` before admitting a peer to a room
-- Rejects write-intent connections from read-only tokens
-- Provides `connection-error` events on ICE failure
+The hardcoded `wss://signaling.y-webrtc.com` URL is replaced by a pluggable `ISignalingTransport` abstraction. `WebRTCProvider` accepts any transport; `Document` constructs a `ResilientSignalingTransport` when a `BulletinClient` is available.
 
-### Phase 4 — Control plane
+```mermaid
+sequenceDiagram
+    participant Doc as Document
+    participant RST as ResilientSignalingTransport
+    participant PST as PublicSignalingTransport
+    participant BST as BulletinSignalingTransport
+    participant Chain as bulletin-westend
+
+    Doc->>RST: _buildSignalingTransport()
+    RST->>PST: construct(signalingUrls)
+    Note over RST: start signalingFallbackTimeoutMs timer
+    RST-->>Doc: signalingUrls = PST.signalingUrls
+
+    alt peer connects via public signaling
+        Doc->>RST: onPeerConnected()
+        RST->>RST: cancel timer
+    else timer fires — no peer
+        RST->>BST: BulletinSignalingTransport.create(bulletinClient)
+        BST->>BST: spawn http.Server + WebSocketServer on 127.0.0.1
+        BST-->>RST: transport with ws://127.0.0.1:PORT
+        RST->>Doc: _handleSignalingFallback(BST)
+        Doc->>Doc: recreate WebRTCProvider with BST.signalingUrls
+        Note over BST,Chain: outbound ICE signals stored as JSON envelopes on chain
+        Note over BST,Chain: inbound signals read from TransactionStorage.Stored events
+    end
+```
+
+**How the chain bridge works:** `BulletinSignalingTransport` opens a local WebSocket server that y-webrtc connects to as its "signaling" server. When y-webrtc publishes an ICE signal, the bridge serialises it into a JSON envelope `{ d: docId, f: accountId, p: payload }` and calls `BulletinClient.store()`. A block-event subscription (`subscribeToStoredCids`) watches for new `TransactionStorage.Stored` events; for each new CID the bridge fetches the bytes, deserialises the envelope, filters out own-account and wrong-room messages, and forwards the rest to y-webrtc's WebSocket client. Awareness messages are dropped — they are not meaningful across chain latency.
+
+**Configuration:** Settings → Bulletin Chain → *Signaling servers* (one URL per line) and *Signaling fallback timeout* (seconds; 0 = disabled). The fallback is silently skipped if no Bulletin Chain keypair is configured.
+
+### Phase 4 — Private signaling
+
+Replace `wss://signaling.y-webrtc.com` with a self-hosted signaling server that validates `clientToken.token` before admitting a peer to a room and rejects write-intent connections from read-only tokens.
+
+### Phase 5 — Control plane
 
 Replace the System 3 OAuth / control plane with a decentralised identity and permissioning layer. At this point `clientToken.token` and `clientToken.url` can be fully removed.
 
@@ -248,7 +344,7 @@ Replace the System 3 OAuth / control plane with a decentralised identity and per
 ```bash
 npm install
 npm run build   # tsc + esbuild (develop profile)
-npm test        # jest unit tests (34 tests: 22 WebRTC + 12 Bulletin Chain)
+npm test        # jest unit tests (60 tests across WebRTC, Bulletin Chain, and signaling layers)
 ```
 
 The encrypted test files copied from the upstream repo (`__tests__/**` except `src/client/__tests__/`) require the upstream git-crypt key and cannot be run in this fork without it.
