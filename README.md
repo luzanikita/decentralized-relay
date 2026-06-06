@@ -81,6 +81,8 @@ classDiagram
 
 ### Files changed
 
+**Phase 1 — WebRTC provider swap:**
+
 | File | Change |
 |---|---|
 | `package.json` | Added `y-webrtc ^10.3.0` |
@@ -89,6 +91,23 @@ classDiagram
 | `src/client/__tests__/webrtc-provider.test.ts` | **New.** 22 unit tests (mocked y-webrtc) |
 | `src/HasProvider.ts` | `makeProvider()` constructs `WebRTCProvider`; `_provider` typed as `IRelayProvider`; removed `debuggerUrl`; simplified `deferDisconnectForPendingMessages()` |
 | `src/SharedFolder.ts` | `subscribeToEvents` call made optional (`?.`) for provider compat |
+
+**Phase 2 — Bulletin Chain persistence:**
+
+| File | Change |
+|---|---|
+| `package.json` | Added `polkadot-api`, `@polkadot/keyring`, `@polkadot/util-crypto`, `@polkadot-api/signer`, `multiformats`, `@polkadot-api/cli` |
+| `.papi/` | **New.** Generated PAPI descriptors for `bulletin-westend` chain |
+| `src/bulletin/types.ts` | **New.** `BulletinSettings` interface + `DEFAULT_BULLETIN_SETTINGS` |
+| `src/bulletin/BulletinClient.ts` | **New.** PAPI WebSocket client: `store(data)` → submits tx + returns CID; `fetch(cid)` → retrieves from IPFS gateway with CID format validation + blake2b-256 content integrity check |
+| `src/bulletin/BulletinCheckpoint.ts` | **New.** Per-document coordinator: counts Yjs updates, fires checkpoint at 50, `fetchAndApply()` on open |
+| `src/bulletin/__tests__/bulletin-client.test.ts` | **New.** 5 unit tests for BulletinClient |
+| `src/bulletin/__tests__/bulletin-checkpoint.test.ts` | **New.** 7 unit tests for BulletinCheckpoint |
+| `src/main.ts` | `RelaySettings` extends `BulletinSettings`; `Live` creates/destroys `BulletinClient` in lifecycle; injects into `SharedFolder` |
+| `src/SharedFolder.ts` | Added `public bulletinClient: BulletinClient \| null` |
+| `src/Document.ts` | `ensureRemoteDoc()` creates `BulletinCheckpoint` + calls `fetchAndApply()`; added `destroyRemoteDoc()` override that fires final checkpoint |
+| `src/components/BulletinSettingsSection.svelte` | **New.** Settings UI: enable toggle, RPC URL, keyfile path, password, IPFS gateway |
+| `src/components/PluginSettings.svelte` | Added `<BulletinSettingsSection>` to settings panel |
 
 ### Behaviour mapping
 
@@ -119,7 +138,7 @@ classDiagram
 
 | Limitation | Detail |
 |---|---|
-| **No offline persistence** | Peers who disconnect miss updates. There is no persistent store; reconnecting peers must re-sync from an online peer. |
+| **Offline persistence (experimental)** | The optional Bulletin Chain backup (disabled by default) snapshots documents to the Polkadot Bulletin Chain testnet. Reconnecting peers can catch up from the chain when no live peer is available. Requires a funded sr25519 keypair on bulletin-westend and a configured RPC URL. See Settings → Bulletin Chain. |
 | **Subdoc sync disabled** | `subscribeToEvents`, `getSubdocQueryDocIds`, `onSubdocIndex` are y-sweet–specific. `WebRTCProvider` exposes them as optional no-ops. Subdoc indexing does not work. |
 | **No `connection-error` on ICE failure** | y-webrtc does not surface ICE negotiation failures as an event. |
 | **Signaling still centralised** | `wss://signaling.y-webrtc.com` is a public server run by the y-webrtc maintainer. It is stateless and content-blind but is still a single point of failure. |
@@ -140,9 +159,9 @@ gantt
     HasProvider swap               :done, 2026-06, 1d
     Read-only guard                :done, 2026-06, 1d
 
-    section Phase 2 — Persistence
-    Polkadot Bulletin Chain store  :2026-07, 30d
-    Offline catch-up on reconnect  :2026-07, 14d
+    section Phase 2 — Persistence (done)
+    Polkadot Bulletin Chain store  :done, 2026-06, 1d
+    Offline catch-up on reconnect  :done, 2026-06, 1d
 
     section Phase 3 — Private signaling
     Self-hosted signaling server   :2026-08, 21d
@@ -154,9 +173,11 @@ gantt
     End-to-end encryption (password option) :2026-09, 14d
 ```
 
-### Phase 2 — Persistence (Polkadot Bulletin Chain)
+### Phase 2 — Persistence (Polkadot Bulletin Chain) ✓ done
 
-Replace the S3 attachment store and provider sync state with the [Polkadot Bulletin Chain](https://github.com/paritytech/polkadot-bulletin-chain). Peers who reconnect after being offline can catch up from the chain rather than requiring a live peer.
+The optional Bulletin Chain backup snapshots Yjs document state to the [Polkadot Bulletin Chain](https://github.com/paritytech/polkadot-bulletin-chain) testnet (bulletin-westend). Every 50 edits, and on document close, a snapshot is written to the chain and its CID is distributed to peers via a `_bulletin` Y.Map inside the shared document. On open, `fetchAndApply()` retrieves the last known snapshot and merges it before WebRTC connects — giving reconnecting peers a starting point even when no live peer is available.
+
+**Remaining gaps:** Account authorization on the testnet faucet is not automated; the keyfile password is stored in `data.json` plaintext; the final checkpoint on close is best-effort (fire-and-forget over WebSocket).
 
 ### Phase 3 — Private signaling
 
@@ -176,7 +197,7 @@ Replace the System 3 OAuth / control plane with a decentralised identity and per
 ```bash
 npm install
 npm run build   # tsc + esbuild (develop profile)
-npm test        # jest unit tests (22 tests)
+npm test        # jest unit tests (34 tests: 22 WebRTC + 12 Bulletin Chain)
 ```
 
 The encrypted test files copied from the upstream repo (`__tests__/**` except `src/client/__tests__/`) require the upstream git-crypt key and cannot be run in this fork without it.
