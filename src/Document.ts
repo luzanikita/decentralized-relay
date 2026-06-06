@@ -24,6 +24,10 @@ import { generateHash } from "./hashing";
 import { trackAsyncCleanup } from "./reloadUtils";
 import { trackPromise } from "./trackPromise";
 import { BulletinCheckpoint } from './bulletin/BulletinCheckpoint';
+import type { ISignalingTransport } from './signaling/ISignalingTransport';
+import { ResilientSignalingTransport } from './signaling/ResilientSignalingTransport';
+import type { BulletinSignalingTransport } from './signaling/BulletinSignalingTransport';
+import { DEFAULT_BULLETIN_SETTINGS } from './bulletin/types';
 
 export function isDocument(file?: IFile): file is Document {
 	return file instanceof Document;
@@ -650,6 +654,22 @@ export class Document extends HasProvider implements IFile, HasMimeType {
 
 	static checkExtension(vpath: string): boolean {
 		return vpath.endsWith(".md");
+	}
+
+	protected _buildSignalingTransport(): ISignalingTransport {
+		const bulletinClient = this._parent.bulletinClient;
+		if (!bulletinClient) {
+			return super._buildSignalingTransport();
+		}
+		const settings = {
+			...DEFAULT_BULLETIN_SETTINGS,
+			...(this._parent as any).bulletinSettings?.get?.(),
+		};
+		return new ResilientSignalingTransport(
+			settings,
+			bulletinClient,
+			(transport: BulletinSignalingTransport) => this._handleSignalingFallback(transport),
+		);
 	}
 
 	destroy() {

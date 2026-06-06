@@ -14,6 +14,9 @@ import { LiveTokenStore } from "./LiveTokenStore";
 import type { ClientToken } from "./client/types";
 import { S3RN, type S3RNType } from "./S3RN";
 import type { TimeProvider } from "./TimeProvider";
+import type { ISignalingTransport } from "./signaling/ISignalingTransport";
+import { PublicSignalingTransport } from "./signaling/PublicSignalingTransport";
+import type { BulletinSignalingTransport } from "./signaling/BulletinSignalingTransport";
 
 export interface Subscription {
 	on: () => void;
@@ -25,12 +28,13 @@ function makeProvider(
 	ydoc: Y.Doc,
 	user: User | undefined,
 	_timeProvider: TimeProvider,
+	transport?: ISignalingTransport,
 ): IRelayProvider {
 	const provider = new WebRTCProvider(
 		clientToken.docId,
 		ydoc,
 		user ? { name: user.name } : undefined,
-		{ readOnly: clientToken.authorization === 'read-only' },
+		{ transport, readOnly: clientToken.authorization === 'read-only' },
 	);
 
 	if (user) {
@@ -69,6 +73,8 @@ export class HasProvider extends HasLogging {
 	_provider: IRelayProvider | null = null;
 	path?: string;
 	private _ydoc: Y.Doc | null = null;
+	protected _signalingTransport: ISignalingTransport | null = null;
+	protected _destroyed = false;
 	clientToken: ClientToken;
 	private _deferredDisconnectTimer: number | null = null;
 	private _deferredDisconnectStatusListener:
@@ -139,11 +145,13 @@ export class HasProvider extends HasLogging {
 		const user = this.loginManager?.user;
 		this._ydoc = new Y.Doc();
 
+		this._signalingTransport = this._buildSignalingTransport();
 		this._provider = makeProvider(
 			this.clientToken,
 			this._ydoc,
 			user,
 			this.timeProvider,
+			this._signalingTransport,
 		);
 		this._provider.beforeReconnect = async () => {
 			const clientToken = await this.getProviderToken();
@@ -512,7 +520,29 @@ export class HasProvider extends HasLogging {
 		return { on, off } as Subscription;
 	}
 
+	protected _buildSignalingTransport(): ISignalingTransport {
+		return new PublicSignalingTransport();
+	}
+
+	protected _handleSignalingFallback(newTransport: BulletinSignalingTransport): void {
+		const ydoc = this._ydoc;
+		if (!ydoc || this._destroyed) return;
+		this._provider?.destroy();
+		const user = this.loginManager?.user;
+		this._signalingTransport = newTransport;
+		this._provider = makeProvider(
+			this.clientToken,
+			ydoc,
+			user,
+			this.timeProvider,
+			newTransport,
+		);
+		this._provider.connect();
+		this.notifyListeners();
+	}
+
 	destroy() {
+		this._destroyed = true;
 		this.destroyRemoteDoc();
 		this.loginManager = null as any;
 	}
