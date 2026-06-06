@@ -28,7 +28,12 @@ jest.mock('@polkadot-api/signer', () => ({
   getPolkadotSigner: jest.fn().mockReturnValue({}),
 }));
 jest.mock('multiformats/cid', () => ({
-  CID: { createV1: jest.fn().mockReturnValue({ toString: () => 'bafyreiabc123def' }) },
+  CID: {
+    createV1: jest.fn().mockReturnValue({ toString: () => 'bafyreiabc123def' }),
+    parse: jest.fn().mockReturnValue({
+      multihash: { code: 0xb220, digest: new Uint8Array(32).fill(2) },
+    }),
+  },
 }));
 jest.mock('multiformats/hashes/digest', () => ({
   create: jest.fn().mockReturnValue({}),

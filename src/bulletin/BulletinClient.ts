@@ -97,12 +97,24 @@ export class BulletinClient {
   }
 
   async fetch(cid: string): Promise<Uint8Array> {
-    const url = `${this.settings.bulletinIpfsGateway}${cid}`;
+    // (a) Validate CID format — rejects arbitrary peer-supplied strings
+    const parsed = CID.parse(cid);
+    // (c) URL-encode the CID segment so it cannot rewrite the request path
+    const url = `${this.settings.bulletinIpfsGateway}${encodeURIComponent(cid)}`;
     const response = await globalThis.fetch(url);
     if (!response.ok) {
       throw new Error(`IPFS fetch failed: ${response.status}`);
     }
-    return new Uint8Array(await response.arrayBuffer());
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    // (b) Verify content integrity: recompute hash and compare to CID's multihash
+    if (parsed.multihash.code === BLAKE2B_256) {
+      const actualHash = blake2AsU8a(bytes, 256);
+      const expectedHash = parsed.multihash.digest;
+      if (actualHash.length !== expectedHash.length || !actualHash.every((b, i) => b === expectedHash[i])) {
+        throw new Error(`[BulletinClient] content integrity check failed for CID ${cid}`);
+      }
+    }
+    return bytes;
   }
 
   destroy(): void {
