@@ -91,6 +91,9 @@ import {
 	setPluginRequestConfig,
 } from "./customFetch";
 import { RelayDebugAPI } from "./RelayDebugAPI";
+import type { BulletinSettings } from './bulletin/types';
+import { DEFAULT_BULLETIN_SETTINGS } from './bulletin/types';
+import { BulletinClient } from './bulletin/BulletinClient';
 
 interface DebugSettings {
 	debugging: boolean;
@@ -100,7 +103,7 @@ const DEFAULT_DEBUG_SETTINGS: DebugSettings = {
 	debugging: false,
 };
 
-interface RelaySettings extends FeatureFlags, DebugSettings {
+interface RelaySettings extends FeatureFlags, DebugSettings, BulletinSettings {
 	sharedFolders: SharedFolderSettings[];
 	release: ReleaseSettings;
 	endpoints: EndpointSettings;
@@ -114,6 +117,7 @@ const DEFAULT_SETTINGS: RelaySettings = {
 	endpoints: {},
 	...FeatureFlagDefaults,
 	...DEFAULT_DEBUG_SETTINGS,
+	...DEFAULT_BULLETIN_SETTINGS,
 };
 
 type VaultDeleteEvent = {
@@ -156,6 +160,8 @@ export default class Live extends Plugin {
 	public releaseSettings!: NamespacedSettings<ReleaseSettings>;
 	public loginSettings!: NamespacedSettings<LoginSettings>;
 	public endpointSettings!: NamespacedSettings<EndpointSettings>;
+	public bulletinClient: BulletinClient | null = null;
+	private bulletinSettings!: NamespacedSettings<BulletinSettings>;
 	debug!: (...args: unknown[]) => void;
 	log!: (...args: unknown[]) => void;
 	warn!: (...args: unknown[]) => void;
@@ -554,6 +560,14 @@ export default class Live extends Plugin {
 		this.releaseSettings = new NamespacedSettings(this.settings, "release");
 		this.loginSettings = new NamespacedSettings(this.settings, "login");
 		this.endpointSettings = new NamespacedSettings(this.settings, "endpoints");
+		this.bulletinSettings = new NamespacedSettings<BulletinSettings>(
+			this.settings,
+			'(bulletin*)',
+		);
+		const bSettings = this.bulletinSettings.get();
+		if (bSettings.bulletinEnabled && bSettings.bulletinRpcUrl && bSettings.bulletinKeyfilePath) {
+			this.bulletinClient = new BulletinClient(bSettings);
+		}
 
 		const flagManager = FeatureFlagManager.getInstance();
 		flagManager.setSettings(this.featureSettings);
@@ -1038,6 +1052,7 @@ export default class Live extends Plugin {
 			authoritative,
 			remote,
 		);
+		folder.bulletinClient = this.bulletinClient;
 		return folder;
 	}
 
@@ -1795,6 +1810,14 @@ export default class Live extends Plugin {
 			this.endpointSettings.destroy();
 		});
 		this.endpointSettings = null as any;
+		teardownStep("bulletinClient.destroy", () => {
+			this.bulletinClient?.destroy();
+			this.bulletinClient = null;
+		});
+		teardownStep("bulletinSettings.destroy", () => {
+			this.bulletinSettings?.destroy();
+		});
+		this.bulletinSettings = null as any;
 		teardownStep("settings.destroy", () => {
 			this.settings.destroy();
 		});

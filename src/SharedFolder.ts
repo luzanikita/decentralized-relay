@@ -78,6 +78,7 @@ import {
 import { expandDesiredRemotePaths } from "./syncPathUtils";
 import type { TimeProvider } from "./TimeProvider";
 import * as Y from "yjs";
+import type { BulletinClient } from './bulletin/BulletinClient';
 
 export interface SharedFolderSettings {
 	guid: string;
@@ -183,6 +184,7 @@ export class SharedFolder extends HasProvider {
 	private storageQuota?: number;
 	private pendingDeletes: Set<string> = new Set();
 	private enabledSyncTypes: Set<SyncType> = new Set();
+	public bulletinClient: BulletinClient | null = null;
 
 
 	private _persistence: IndexeddbPersistence;
