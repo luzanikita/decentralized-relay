@@ -23,6 +23,7 @@ import { reconnectProvider } from "./merge-hsm/integration/ProviderLifecycle";
 import { generateHash } from "./hashing";
 import { trackAsyncCleanup } from "./reloadUtils";
 import { trackPromise } from "./trackPromise";
+import { BulletinCheckpoint } from './bulletin/BulletinCheckpoint';
 
 export function isDocument(file?: IFile): file is Document {
 	return file instanceof Document;
@@ -56,6 +57,8 @@ export class Document extends HasProvider implements IFile, HasMimeType {
 	 * Created in the constructor and cleared on destroy().
 	 */
 	private _hsm: MergeHSM | null;
+
+	private _bulletinCheckpoint: BulletinCheckpoint | null = null;
 
 	/**
 	 * ProviderIntegration instance for bridging HSM with the provider.
@@ -250,8 +253,22 @@ export class Document extends HasProvider implements IFile, HasMimeType {
 		const doc = super.ensureRemoteDoc();
 		if (isNew) {
 			this.seedRemoteDocFromServerAdvertisedSnapshot(doc);
+			const bulletinClient = this._parent.bulletinClient;
+			if (bulletinClient) {
+				this._bulletinCheckpoint = new BulletinCheckpoint(doc, bulletinClient, this.guid);
+				void this._bulletinCheckpoint.fetchAndApply();
+			}
 		}
 		return doc;
+	}
+
+	destroyRemoteDoc(): void {
+		if (this._bulletinCheckpoint) {
+			void this._bulletinCheckpoint.checkpoint();
+			this._bulletinCheckpoint.destroy();
+			this._bulletinCheckpoint = null;
+		}
+		super.destroyRemoteDoc();
 	}
 
 	private seedRemoteDocFromServerAdvertisedSnapshot(remoteDoc: Y.Doc): void {
