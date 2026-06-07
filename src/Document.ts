@@ -95,7 +95,7 @@ export class Document extends HasProvider implements IFile, HasMimeType {
 		const s3rn = parent.relayId
 			? new S3RemoteDocument(parent.relayId, parent.guid, guid)
 			: new S3Document(parent.guid, guid);
-		super(guid, s3rn, parent.tokenStore, loginManager);
+		super(guid, s3rn, parent.tokenStore, loginManager, parent.controlPlane);
 		this.timeProvider = parent.timeProvider;
 		this._parent = parent;
 		this.path = path;
@@ -330,11 +330,11 @@ export class Document extends HasProvider implements IFile, HasMimeType {
 
 		// Create ProviderIntegration BEFORE awaiting so it can deliver
 		// PROVIDER_SYNCED during the entering phase (needed for empty-IDB flow).
-		if (!this._providerIntegration) {
+		if (!this._providerIntegration && this._provider) {
 			this._providerIntegration = new ProviderIntegration(
 				hsm,
 				remoteDoc,
-				this._provider! as YjsProvider,
+				this._provider as YjsProvider,
 				{ onSyncedRemoteHead: this.recordProviderSyncedRemoteHead },
 			);
 		}
