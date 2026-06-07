@@ -18,6 +18,8 @@ import type { ISignalingTransport } from "./signaling/ISignalingTransport";
 import { PublicSignalingTransport } from "./signaling/PublicSignalingTransport";
 import type { BulletinSignalingTransport } from "./signaling/BulletinSignalingTransport";
 
+const DEFERRED_DOC_ID = '-';
+
 export interface Subscription {
 	on: () => void;
 	off: () => void;
@@ -111,7 +113,7 @@ export class HasProvider extends HasLogging {
 					relayUrl: cachedToken.url,
 					relayToken: cachedToken.token,
 				}
-			: { docId: '-', authorization: 'full' };
+			: { docId: DEFERRED_DOC_ID, authorization: 'full' };
 	}
 
 	/**
@@ -151,7 +153,7 @@ export class HasProvider extends HasLogging {
 
 		this._ydoc = new Y.Doc();
 
-		if (this.sessionParams.docId !== '-') {
+		if (this.sessionParams.docId !== DEFERRED_DOC_ID) {
 			this._createProvider();
 		}
 
@@ -270,7 +272,7 @@ export class HasProvider extends HasLogging {
 	}
 
 	providerActive() {
-		return this._provider !== null && this.sessionParams.docId !== '-';
+		return this._provider !== null && this.sessionParams.docId !== DEFERRED_DOC_ID;
 	}
 
 	refreshProvider(sessionParams: SessionParams) {
@@ -311,7 +313,9 @@ export class HasProvider extends HasLogging {
 				} else {
 					this.refreshProvider(sessionParams);
 				}
-				this._provider!.connect();
+				if (this._provider) {
+					this._provider.connect();
+				}
 				this.notifyListeners();
 				return true;
 			})
@@ -381,7 +385,11 @@ export class HasProvider extends HasLogging {
 		if (this.state.status === "connected") {
 			return Promise.resolve();
 		}
-		const provider = this._provider!;
+		if (!this._provider) {
+			// Deferred path: provider not yet created, trigger connect then retry
+			return this.connect().then(() => this.onceConnected());
+		}
+		const provider = this._provider;
 		return new Promise((resolve) => {
 			const resolveOnConnect = (state: ConnectionState) => {
 				if (state.status === "connected") {
@@ -398,7 +406,10 @@ export class HasProvider extends HasLogging {
 			return Promise.resolve();
 		}
 		this.ensureRemoteDoc();
-		const provider = this._provider!;
+		if (!this._provider) {
+			return this.connect().then(() => this.onceProviderSynced());
+		}
+		const provider = this._provider;
 		if (provider.synced) {
 			this._providerSynced = true;
 			return Promise.resolve();
@@ -473,7 +484,7 @@ export class HasProvider extends HasLogging {
 
 	reset() {
 		this.disconnect();
-		this.sessionParams = { docId: '-', authorization: 'full' };
+		this.sessionParams = { docId: DEFERRED_DOC_ID, authorization: 'full' };
 	}
 
 
