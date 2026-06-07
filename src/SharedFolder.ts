@@ -79,6 +79,7 @@ import { expandDesiredRemotePaths } from "./syncPathUtils";
 import type { TimeProvider } from "./TimeProvider";
 import * as Y from "yjs";
 import type { BulletinClient } from './bulletin/BulletinClient';
+import type { IControlPlane } from './control-plane/IControlPlane';
 
 export interface SharedFolderSettings {
 	guid: string;
@@ -185,6 +186,7 @@ export class SharedFolder extends HasProvider {
 	private pendingDeletes: Set<string> = new Set();
 	private enabledSyncTypes: Set<SyncType> = new Set();
 	public bulletinClient: BulletinClient | null = null;
+	public controlPlane!: IControlPlane;
 
 
 	private _persistence: IndexeddbPersistence;
@@ -228,6 +230,7 @@ export class SharedFolder extends HasProvider {
 		private _settings: NamespacedSettings<SharedFolderSettings>,
 		private _hsmStore: HSMStore,
 		timeProvider: TimeProvider,
+		controlPlane: IControlPlane,
 		relayId?: string,
 		authoritative: boolean = false,
 		remote?: RemoteSharedFolder,
@@ -237,7 +240,8 @@ export class SharedFolder extends HasProvider {
 			? new S3RemoteFolder(folderRelayId, guid)
 			: new S3Folder(guid);
 
-		super(guid, s3rn, tokenStore, loginManager);
+		super(guid, s3rn, tokenStore, loginManager, controlPlane);
+		this.controlPlane = controlPlane;
 		this.timeProvider = timeProvider;
 		this.path = path;
 		this.setLoggers(`[SharedFile](${this.path})`);
