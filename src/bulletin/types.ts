@@ -11,6 +11,7 @@ export interface BulletinSettings {
    * 0 = disabled. Only active when bulletinEnabled is true.
    */
   signalingFallbackTimeoutMs: number;
+  bulletinControlPlaneEnabled: boolean;
 }
 
 export const DEFAULT_BULLETIN_SETTINGS: BulletinSettings = {
@@ -21,4 +22,5 @@ export const DEFAULT_BULLETIN_SETTINGS: BulletinSettings = {
   bulletinIpfsGateway: 'https://ipfs.io/ipfs/',
   signalingUrls: ['wss://signaling.y-webrtc.com'],
   signalingFallbackTimeoutMs: 8000,
+  bulletinControlPlaneEnabled: false,
 };
