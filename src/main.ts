@@ -94,6 +94,9 @@ import { RelayDebugAPI } from "./RelayDebugAPI";
 import type { BulletinSettings } from './bulletin/types';
 import { DEFAULT_BULLETIN_SETTINGS } from './bulletin/types';
 import { BulletinClient } from './bulletin/BulletinClient';
+import type { IControlPlane } from './control-plane/IControlPlane';
+import { RelayControlPlane } from './control-plane/RelayControlPlane';
+import { BulletinControlPlane } from './control-plane/BulletinControlPlane';
 
 interface DebugSettings {
 	debugging: boolean;
@@ -1048,12 +1051,21 @@ export default class Live extends Plugin {
 			folderSettings,
 			this._hsmStore,
 			this.timeProvider,
+			this._buildControlPlane(),
 			relayId,
 			authoritative,
 			remote,
 		);
 		folder.bulletinClient = this.bulletinClient;
 		return folder;
+	}
+
+	private _buildControlPlane(): IControlPlane {
+		const settings = this.bulletinSettings?.get?.() ?? {};
+		if ((settings as any).bulletinControlPlaneEnabled) {
+			return new BulletinControlPlane();
+		}
+		return new RelayControlPlane(this.tokenStore);
 	}
 
 	private _onLogout() {
