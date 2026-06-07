@@ -105,6 +105,7 @@ describe('PasskeyIdentity.getMasterSigner()', () => {
     expect(mockGet).toHaveBeenCalledWith(
       expect.objectContaining({
         publicKey: expect.objectContaining({
+          userVerification: 'required',
           extensions: expect.objectContaining({ prf: expect.any(Object) }),
         }),
       }),

@@ -15,7 +15,9 @@ export class PasskeyIdentity {
     private readonly assetHubClient: AssetHubClient,
     private readonly safeStorage: ElectronSafeStorage,
     private readonly rpId: string = 'localhost',
-  ) {}
+  ) {
+    if (!rpId) throw new Error('[PasskeyIdentity] rpId must be a non-empty string');
+  }
 
   private _patch(patch: Partial<PasskeySettings>): void {
     Object.assign(this.settings, patch);
@@ -36,6 +38,7 @@ export class PasskeyIdentity {
           { type: 'public-key', alg: -7 },
           { type: 'public-key', alg: -257 },
         ],
+        authenticatorSelection: { userVerification: 'required', residentKey: 'preferred' },
         extensions: { prf: {} } as any,
       },
     })) as PublicKeyCredential;
@@ -58,6 +61,7 @@ export class PasskeyIdentity {
     const keyring = new Keyring({ type: 'sr25519' });
     const devicePair = keyring.addFromSeed(deviceSeed);
 
+    // addProxy first: if encrypt/save fails after, the dangling proxy is recoverable; reversed order would store a key with no on-chain proxy
     await this.assetHubClient.addProxy(devicePair.address, masterSigner);
 
     const encrypted = this.safeStorage.encryptString(Buffer.from(deviceSeed).toString('hex'));
@@ -90,6 +94,7 @@ export class PasskeyIdentity {
       publicKey: {
         challenge: globalThis.crypto.getRandomValues(new Uint8Array(32)),
         allowCredentials: [{ type: 'public-key', id: credentialId }],
+        userVerification: 'required',
         extensions: { prf: { eval: { first: PRF_SALT } } } as any,
       },
     })) as PublicKeyCredential;
