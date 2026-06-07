@@ -108,6 +108,13 @@ describe('BulletinClient', () => {
     await expect(client.fetch('bafybadcid')).rejects.toThrow('IPFS fetch failed: 404');
     client.destroy();
   });
+
+  test('destroy() calls connection.destroy()', async () => {
+    const client = makeClient();
+    await client.connect();
+    client.destroy();
+    expect(mockConnectionDestroy).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('BulletinClient.accountId', () => {
@@ -190,3 +197,4 @@ describe('BulletinClient.subscribeToStoredCids()', () => {
     client.destroy();
   });
 });
+

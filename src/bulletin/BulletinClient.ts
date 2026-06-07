@@ -23,14 +23,19 @@ export class BulletinClient {
   async connect(): Promise<void> {
     if (this._typedApi) return;
     if (this._connectPromise) return this._connectPromise;
-    this._connectPromise = this._doConnect();
+    this._connectPromise = this._doConnect().catch((e) => {
+      this._connectPromise = null;
+      throw e;
+    });
     return this._connectPromise;
   }
 
   private async _doConnect(): Promise<void> {
     await this.connection.connect();
-    this._typedApi = this.connection.getClient().getTypedApi(bulletin);
-    this._signer = await this.signerFactory();
+    const typedApi = this.connection.getClient().getTypedApi(bulletin);
+    const signer = await this.signerFactory();
+    this._typedApi = typedApi;
+    this._signer = signer;
   }
 
   async store(data: Uint8Array): Promise<string> {

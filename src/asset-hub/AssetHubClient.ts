@@ -6,11 +6,21 @@ import type { ProxyEntry } from './types';
 
 export class AssetHubClient {
   private _typedApi: any = null;
+  private _connectPromise: Promise<void> | null = null;
 
   constructor(private readonly connection: ChainConnection) {}
 
   async connect(): Promise<void> {
     if (this._typedApi) return;
+    if (this._connectPromise) return this._connectPromise;
+    this._connectPromise = this._doConnect().catch((e) => {
+      this._connectPromise = null;
+      throw e;
+    });
+    return this._connectPromise;
+  }
+
+  private async _doConnect(): Promise<void> {
     await this.connection.connect();
     this._typedApi = this.connection.getClient().getTypedApi(westend_asset_hub);
   }
@@ -36,7 +46,8 @@ export class AssetHubClient {
   async getProxies(masterAddress: string): Promise<ProxyEntry[]> {
     await this.connect();
     const result = await this._typedApi.query.Proxy.Proxies.getValue(masterAddress);
-    const [proxies] = result as [Array<{ delegate: Uint8Array; proxy_type: { type: string }; delay: number }>];
+    const proxies: Array<{ delegate: Uint8Array; proxy_type: { type: string }; delay: number }> =
+      Array.isArray(result?.[0]) ? result[0] : [];
     return proxies.map((p) => ({
       delegate: encodeAddress(p.delegate),
       proxyType: p.proxy_type.type,
@@ -46,6 +57,7 @@ export class AssetHubClient {
 
   destroy(): void {
     this._typedApi = null;
+    this._connectPromise = null;
     this.connection.destroy();
   }
 }

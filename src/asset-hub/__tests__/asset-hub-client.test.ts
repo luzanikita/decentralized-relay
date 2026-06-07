@@ -84,4 +84,10 @@ describe('AssetHubClient', () => {
     const proxies = await client.getProxies('5GMasterAddress');
     expect(proxies).toHaveLength(0);
   });
+
+  test('destroy() calls connection.destroy()', () => {
+    const client = new AssetHubClient(mockChainConnection as any);
+    client.destroy();
+    expect(mockChainConnection.destroy).toHaveBeenCalledTimes(1);
+  });
 });
