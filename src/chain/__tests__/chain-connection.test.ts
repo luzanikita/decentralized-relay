@@ -60,4 +60,21 @@ describe('ChainConnection', () => {
     expect(conn.state).toBe('failed');
     await expect(conn.connect()).rejects.toThrow('previously failed');
   });
+
+  test('connect() works again after destroy()', async () => {
+    const conn = new ChainConnection('wss://test');
+    await conn.connect();
+    conn.destroy();
+    expect(conn.state).toBe('idle');
+    await conn.connect();
+    expect(conn.state).toBe('connected');
+    expect(mockCreateClient).toHaveBeenCalledTimes(2);
+  });
+
+  test('concurrent connect() calls create only one client', async () => {
+    const conn = new ChainConnection('wss://test');
+    await Promise.all([conn.connect(), conn.connect(), conn.connect()]);
+    expect(mockCreateClient).toHaveBeenCalledTimes(1);
+    expect(conn.state).toBe('connected');
+  });
 });

@@ -27,6 +27,7 @@ export class ChainConnection {
       this._state = 'connected';
     } catch (e) {
       this._state = 'failed';
+      this._connectPromise = null;
       throw e;
     }
   }
