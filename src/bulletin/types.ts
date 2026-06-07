@@ -1,26 +1,19 @@
 export interface BulletinSettings {
-  bulletinEnabled: boolean;
-  bulletinRpcUrl: string;
-  bulletinKeyfilePath: string;
-  bulletinKeyfilePassword: string;
-  bulletinIpfsGateway: string;
-  /** WebSocket URLs for the primary public signaling path. */
+  enabled: boolean;
+  rpcUrl: string;
+  ipfsGateway: string;
   signalingUrls: string[];
-  /**
-   * Milliseconds before falling back to Bulletin Chain signaling.
-   * 0 = disabled. Only active when bulletinEnabled is true.
-   */
   signalingFallbackTimeoutMs: number;
-  bulletinControlPlaneEnabled: boolean;
+  controlPlaneEnabled: boolean;
+  assetHubRpcUrl: string;
 }
 
 export const DEFAULT_BULLETIN_SETTINGS: BulletinSettings = {
-  bulletinEnabled: false,
-  bulletinRpcUrl: '',
-  bulletinKeyfilePath: '',
-  bulletinKeyfilePassword: '',
-  bulletinIpfsGateway: 'https://ipfs.io/ipfs/',
+  enabled: false,
+  rpcUrl: '',
+  ipfsGateway: 'https://ipfs.io/ipfs/',
   signalingUrls: ['wss://signaling.y-webrtc.com'],
   signalingFallbackTimeoutMs: 8000,
-  bulletinControlPlaneEnabled: false,
+  controlPlaneEnabled: false,
+  assetHubRpcUrl: 'wss://westend-asset-hub-rpc.polkadot.io',
 };
