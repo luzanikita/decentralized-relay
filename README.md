@@ -5,7 +5,7 @@
 
 This fork replaces the centralized y-sweet relay server with peer-to-peer WebRTC sync
 using [y-webrtc](https://github.com/yjs/y-webrtc). Document content never touches a central server.
-The control plane (OAuth, shared folder management) is unchanged.
+The control plane (OAuth, shared folder management) is being decentralised iteratively — see Roadmap.
 
 ---
 
@@ -128,6 +128,34 @@ classDiagram
     ResilientSignalingTransport --> PublicSignalingTransport : primary
     ResilientSignalingTransport --> BulletinSignalingTransport : fallback
     IRelayProvider <|.. WebRTCProvider : now
+    class IControlPlane {
+        <<interface>>
+        +getSession(resourceId) Promise~SessionParams~
+        +destroy() void
+    }
+
+    class SessionParams {
+        +docId string
+        +authorization full|read-only
+        +relayUrl? string
+        +relayToken? string
+    }
+
+    class RelayControlPlane {
+        Wraps LiveTokenStore
+        Maps ClientToken → SessionParams
+    }
+
+    class BulletinControlPlane {
+        No network call
+        docId = blake2(folderId:docId)
+        authorization always full
+    }
+
+    IControlPlane <|.. RelayControlPlane
+    IControlPlane <|.. BulletinControlPlane
+    IControlPlane --> SessionParams : returns
+    HasProvider --> IControlPlane : _controlPlane
     HasProvider --> IRelayProvider : _provider
     HasProvider --> ISignalingTransport : _signalingTransport
     WebRTCProvider --> ISignalingTransport : _transport
@@ -188,6 +216,23 @@ classDiagram
 | `src/Document.ts` | Overrides `_buildSignalingTransport()` — returns `ResilientSignalingTransport` when `bulletinClient` is available |
 | `src/components/BulletinSettingsSection.svelte` | Added signaling servers textarea and fallback timeout number input |
 
+**Phase 4 — Control plane abstraction:**
+
+| File | Change |
+|---|---|
+| `src/control-plane/IControlPlane.ts` | **New.** `SessionParams` type + `IControlPlane` interface — replaces `ClientToken` as the session data contract for `HasProvider` |
+| `src/control-plane/RelayControlPlane.ts` | **New.** Wraps `LiveTokenStore`; maps `ClientToken` fields to `SessionParams`; no-op background-refresh callback (token freshness via `beforeReconnect`) |
+| `src/control-plane/BulletinControlPlane.ts` | **New.** Pure computation — derives `docId` from blake2 hash of `folderId:documentId`; no network call; `authorization` always `full` |
+| `src/control-plane/__tests__/relay-control-plane.test.ts` | **New.** 7 unit tests for `RelayControlPlane` |
+| `src/control-plane/__tests__/bulletin-control-plane.test.ts` | **New.** 8 unit tests for `BulletinControlPlane` |
+| `src/bulletin/types.ts` | Added `bulletinControlPlaneEnabled: boolean` (default `false`) to `BulletinSettings` |
+| `src/HasProvider.ts` | `clientToken: ClientToken` → `sessionParams: SessionParams`; added `_controlPlane: IControlPlane` constructor param; extracted `_createProvider()` private method; deferred provider creation when `docId` is sentinel (decentralized path); `getProviderToken()` → `getSessionParams()`; `refreshProvider()` only calls relay `refreshToken()` when `relayUrl` present; `providerActive()` simplified; `onceConnected()`/`onceProviderSynced()` guarded against null provider in deferred path; sentinel extracted to `DEFERRED_DOC_ID` constant |
+| `src/SharedFolder.ts` | Added `public controlPlane: IControlPlane`; added `controlPlane` constructor parameter; passed to `super()` |
+| `src/Document.ts` | Passed `parent.controlPlane` to `super()`; null guard in `acquireLock()` for deferred provider path |
+| `src/Canvas.ts` | Passed `parent.controlPlane` to `super()` |
+| `src/main.ts` | Added `_buildControlPlane()` private method (returns `BulletinControlPlane` or `RelayControlPlane` based on settings); passes result to `SharedFolder` constructor |
+| `src/BackgroundSync.ts` | Replaced stale `getProviderToken()` call with direct `tokenStore.getToken()` (relay-only download path) |
+
 ### Behaviour mapping
 
 | YSweetProvider behaviour | WebRTCProvider equivalent |
@@ -209,7 +254,7 @@ classDiagram
 
 | Limitation | Detail |
 |---|---|
-| **No transport-level auth** | Room name = `clientToken.docId` (non-guessable GUID). Any peer who learns the docId can join. The signaling server is public and content-blind. |
+| **No transport-level auth** | Room name = `sessionParams.docId` (non-guessable GUID for relay path; blake2 hash for bulletin path). Any peer who learns the docId can join. The signaling server is public and content-blind. |
 | **Read-only not enforced** | WebRTC is symmetric — there is no server to reject writes from read-only clients. `WebRTCProvider` logs a `console.error` when a local write occurs on a read-only token. Full enforcement requires a gated signaling server. |
 | **No encryption** | y-webrtc supports a `password` option (AES-CBC) that is not yet wired up. Until then, informal privacy depends entirely on docId non-guessability. |
 
@@ -249,14 +294,26 @@ gantt
     ResilientSignalingTransport (timer/fallback) :done, 2026-06, 1d
     Settings UI for signaling URLs     :done, 2026-06, 1d
 
-    section Phase 4 — Private signaling
-    Self-hosted signaling server   :2026-08, 21d
-    Token-gated room admission     :2026-08, 14d
-    Read-only enforcement          :2026-08, 7d
+    section Phase 4 — Control plane abstraction (done)
+    IControlPlane interface            :done, 2026-06, 1d
+    RelayControlPlane (wraps LiveTokenStore) :done, 2026-06, 1d
+    BulletinControlPlane (docId from blake2) :done, 2026-06, 1d
+    HasProvider wiring                 :done, 2026-06, 1d
 
-    section Phase 5 — Control plane
-    Replace OAuth / control plane  :2026-09, 30d
-    End-to-end encryption (password option) :2026-09, 14d
+    section Phase 5 — Passkey identity
+    WebAuthn PRF → sr25519 master account  :2026-08, 21d
+    Ephemeral session key (proxy pallet)   :2026-08, 14d
+    Remove keyfile / plaintext password    :2026-08, 7d
+
+    section Phase 6 — On-chain membership
+    Folder ACL records on bulletin chain   :2026-09, 21d
+    Invite flow via signed chain tx        :2026-09, 14d
+    BulletinControlPlane reads ACL         :2026-09, 14d
+
+    section Phase 7 — Gas management
+    Self-funded path (user holds tokens)   :2026-10, 14d
+    Subscription relayer (company pays gas):2026-10, 21d
+    UX indistinguishable between both      :2026-10, 7d
 ```
 
 ### Phase 2 — Persistence (Polkadot Bulletin Chain) ✓ done
@@ -329,13 +386,50 @@ sequenceDiagram
 
 **Configuration:** Settings → Bulletin Chain → *Signaling servers* (one URL per line) and *Signaling fallback timeout* (seconds; 0 = disabled). The fallback is silently skipped if no Bulletin Chain keypair is configured.
 
-### Phase 4 — Private signaling
+### Phase 4 — Control plane abstraction
 
-Replace `wss://signaling.y-webrtc.com` with a self-hosted signaling server that validates `clientToken.token` before admitting a peer to a room and rejects write-intent connections from read-only tokens.
+Introduce `IControlPlane` — the same pattern as `ISignalingTransport` but for session establishment. `SessionParams { docId, authorization, relayUrl?, relayToken? }` replaces `ClientToken` as the currency of session setup inside `HasProvider`.
 
-### Phase 5 — Control plane
+Two implementations ship in this phase:
 
-Replace the System 3 OAuth / control plane with a decentralised identity and permissioning layer. At this point `clientToken.token` and `clientToken.url` can be fully removed.
+- **`RelayControlPlane`** — wraps the existing `LiveTokenStore`; zero behaviour change for users on the relay path.
+- **`BulletinControlPlane`** — derives `docId = blake2AsHex(folderId + ':' + documentId)` locally; no relay server contact needed. Both peers independently compute the same room name from guids they already hold.
+
+A single settings flag (`bulletinControlPlaneEnabled`) picks one at construction time. The relay server becomes optional rather than mandatory. `BackgroundSync` and `LiveTokenStore` are untouched — they continue to serve the relay HTTP file-sync path unchanged.
+
+### Phase 5 — Passkey identity
+
+Replace the keyfile + plaintext password UX with hardware-backed biometric authentication.
+
+**How it works:** The WebAuthn PRF extension asks the device's secure enclave (Touch ID, Face ID, Windows Hello) to produce a deterministic 32-byte secret from a fixed salt. Those bytes are treated as a Polkadot seed to derive a **master sr25519 account** — no seed phrase written to disk, no JSON file to manage. On a new device, the user touches their fingerprint and the same master account is reconstructed.
+
+On startup, `BulletinClient` generates a fresh ephemeral **session key** (`sr25519`) in memory. A single biometric prompt authorises the master account to register the session key as a proxy via the Bulletin Chain's native Proxy Pallet (`proxy.add_proxy`). From that point all `store()` calls are signed by the in-memory session key and submitted as `proxy.proxy` calls — the master key is never touched again during the session.
+
+Benefits over Phase 2's keyfile approach:
+
+| | Phase 2 (keyfile) | Phase 5 (passkey) |
+|---|---|---|
+| Secret storage | `.json` file on disk, password in `data.json` | Never leaves hardware enclave |
+| New device | Copy keyfile manually | Touch fingerprint |
+| Stolen laptop | Keyfile + password at risk | Session key only; revoke via any other device |
+| UX friction | Configure path + password in settings | One biometric prompt on first use |
+
+### Phase 6 — On-chain membership
+
+Move folder access control from the relay server to the Bulletin Chain. The folder owner posts a signed membership record on-chain: `{ folder: guid, members: [accountA, accountB], role: 'full' | 'read-only' }`. `BulletinControlPlane.getSession()` reads this record to populate `authorization` rather than hardcoding `'full'`.
+
+Invitation flow: owner broadcasts a signed `add_member` transaction. Revocation: owner broadcasts an updated membership list. No relay server API calls involved.
+
+At this point `BulletinControlPlane` requires no server contact at all — room name is derived locally, authorization is read from chain state.
+
+### Phase 7 — Gas management
+
+The Bulletin Chain charges a small transaction fee for each `store()` call. Two funding paths coexist, and the user experience is identical either way:
+
+- **Self-funded:** the user's master Passkey account holds chain tokens and pays gas directly. No subscription required; works entirely without the relay service.
+- **Subscription relayer:** instead of broadcasting directly to the chain RPC, the plugin sends the signed payload to the relay service's backend over HTTPS. The backend verifies the active subscription, wraps the payload in its own gas-paying envelope, and submits it. The user pays a flat monthly fee in fiat (Stripe/Apple Pay) and never touches crypto.
+
+The plugin code path is identical — `BulletinClient.store()` checks subscription status and routes accordingly. Cancelling a subscription doesn't lock users out; they switch to the self-funded path automatically. The relay service never holds document content — only the signed payload envelope it forwards to the chain.
 
 ---
 
