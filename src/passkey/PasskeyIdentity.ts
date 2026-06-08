@@ -21,7 +21,7 @@ export class PasskeyIdentity {
 
   private _patch(patch: Partial<PasskeySettings>): void {
     Object.assign(this.settings, patch);
-    this.saveSettings(this.settings);
+    this.saveSettings({ ...this.settings });
   }
 
   async register(): Promise<void> {
@@ -99,8 +99,12 @@ export class PasskeyIdentity {
       },
     })) as PublicKeyCredential;
 
+    if (!assertion) throw new Error('Passkey authentication was cancelled or no matching credential found');
+
     const ext = (assertion as any).getClientExtensionResults();
-    const prf32 = new Uint8Array(ext.prf.results.first);
+    const prfFirst = ext?.prf?.results?.first;
+    if (!prfFirst) throw new Error('Authenticator did not return a PRF result — ensure the authenticator supports PRF at assertion time');
+    const prf32 = new Uint8Array(prfFirst);
     const masterSeed = await this._hkdf(prf32);
 
     const keyring = new Keyring({ type: 'sr25519' });
