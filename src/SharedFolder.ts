@@ -89,6 +89,7 @@ export interface SharedFolderSettings {
 	localOnly?: boolean;
 	sync?: SyncFlags;
 	remoteActivity?: RemoteActivityEntry[];
+	folderAccountAddress?: string;  // ss58 of per-folder ACL proxy account; absent = owner path
 }
 
 interface Operation {
@@ -1185,6 +1186,14 @@ export class SharedFolder extends HasProvider {
 
 	public get settings(): SharedFolderSettings {
 		return this._settings.get();
+	}
+
+	get folderAccountAddress(): string | null {
+		return this._settings.get().folderAccountAddress ?? null;
+	}
+
+	updateFolderAccountAddress(address: string): void {
+		this._settings.update((s) => ({ ...s, folderAccountAddress: address }));
 	}
 
 	public getRecentRemoteActivity(limit = 30): RemoteActivityEntry[] {

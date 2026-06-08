@@ -102,6 +102,8 @@ import { AssetHubClient } from './asset-hub/AssetHubClient';
 import { PasskeyIdentity } from './passkey/PasskeyIdentity';
 import type { PasskeySettings } from './passkey/types';
 import { DEFAULT_PASSKEY_SETTINGS } from './passkey/types';
+import { JoinRequestMonitor, type JoinRequest } from './acl/JoinRequestMonitor';
+import { writable, type Writable } from 'svelte/store';
 
 interface DebugSettings {
 	debugging: boolean;
@@ -176,6 +178,8 @@ export default class Live extends Plugin {
 	public assetHubClient: AssetHubClient | null = null;
 	private _bulletinConnection: ChainConnection | null = null;
 	private _assetHubConnection: ChainConnection | null = null;
+	private _joinRequestMonitor: JoinRequestMonitor | null = null;
+	public pendingJoinRequests: Writable<JoinRequest[]> = writable([]);
 	debug!: (...args: unknown[]) => void;
 	log!: (...args: unknown[]) => void;
 	warn!: (...args: unknown[]) => void;
@@ -633,6 +637,21 @@ export default class Live extends Plugin {
 				this.passkeyIdentity.getDeviceSigner.bind(this.passkeyIdentity),
 				bSettings.ipfsGateway,
 			);
+		}
+
+		if (this.bulletinClient) {
+			this._joinRequestMonitor = new JoinRequestMonitor(
+				this.bulletinClient,
+				() => new Map(
+					this.sharedFolders
+						.filter((f) => f.folderAccountAddress !== null)
+						.map((f) => [f.guid, f.folderAccountAddress!]),
+				),
+				(req) => {
+					this.pendingJoinRequests.update((list) => [...list, req]);
+				},
+			);
+			this._joinRequestMonitor.start();
 		}
 
 		const flagManager = FeatureFlagManager.getInstance();
@@ -1114,7 +1133,7 @@ export default class Live extends Plugin {
 			folderSettings,
 			this._hsmStore,
 			this.timeProvider,
-			this._buildControlPlane(),
+			this._buildControlPlane(folderSettings),
 			relayId,
 			authoritative,
 			remote,
@@ -1123,13 +1142,18 @@ export default class Live extends Plugin {
 		return folder;
 	}
 
-	private _buildControlPlane(): IControlPlane {
-		const settings = this.bulletinSettings?.get?.() ?? {} as BulletinSettings;
-		if (settings.controlPlaneEnabled) {
+	private _buildControlPlane(
+		folderSettings: NamespacedSettings<SharedFolderSettings>,
+	): IControlPlane {
+		const bSettings = this.bulletinSettings?.get?.() ?? {} as BulletinSettings;
+		if (bSettings.controlPlaneEnabled) {
 			return new BulletinControlPlane(
 				this.assetHubClient!,
-				() => this.passkeySettings?.get?.()?.masterAccountId ?? null,
-				(_folderId: string) => null, // TODO(Task 6): wire per-folder account address
+				() => this.passkeySettings.get().masterAccountId ?? null,
+				(folderId) => {
+					const s = folderSettings.get();
+					return s.guid === folderId ? (s.folderAccountAddress ?? null) : null;
+				},
 			);
 		}
 		return new RelayControlPlane(this.tokenStore);
@@ -1889,6 +1913,10 @@ export default class Live extends Plugin {
 			this.endpointSettings.destroy();
 		});
 		this.endpointSettings = null as any;
+		teardownStep("joinRequestMonitor.stop", () => {
+			this._joinRequestMonitor?.stop();
+			this._joinRequestMonitor = null;
+		});
 		teardownStep("bulletinClient.destroy", () => {
 			this.bulletinClient?.destroy();
 			this.bulletinClient = null;
