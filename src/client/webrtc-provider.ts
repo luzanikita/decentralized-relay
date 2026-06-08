@@ -8,14 +8,15 @@ import type {
   IRelayProvider,
   BeforeReconnect,
 } from './provider';
-
-const DEFAULT_SIGNALING = ['wss://signaling.y-webrtc.com'];
+import type { ISignalingTransport } from '../signaling/ISignalingTransport';
+import { PublicSignalingTransport } from '../signaling/PublicSignalingTransport';
 
 export type User = { name: string; color?: string };
 
 export class WebRTCProvider implements IRelayProvider {
   private inner: WebrtcProvider;
   private emitter = new EventEmitter();
+  private _transport: ISignalingTransport;
   synced = false;
   beforeReconnect: BeforeReconnect | null = null;
   _pendingMessages: unknown[] = [];
@@ -24,14 +25,13 @@ export class WebRTCProvider implements IRelayProvider {
     docId: string,
     ydoc: Y.Doc,
     _user?: User,
-    options?: { signalingUrls?: string[]; readOnly?: boolean },
+    options?: { transport?: ISignalingTransport; readOnly?: boolean },
   ) {
+    this._transport = options?.transport ?? new PublicSignalingTransport();
     this.inner = new WebrtcProvider(docId, ydoc, {
-      signaling: options?.signalingUrls ?? DEFAULT_SIGNALING,
+      signaling: this._transport.signalingUrls,
     });
     if (options?.readOnly) {
-      // WebRTC cannot enforce read-only at the transport layer. Log an error
-      // if the local application writes to the doc so the violation is visible.
       ydoc.on('update', (_update: Uint8Array, origin: unknown) => {
         if (origin === null) {
           console.error(
@@ -55,6 +55,7 @@ export class WebRTCProvider implements IRelayProvider {
 
   destroy(): void {
     this.inner.destroy();
+    this._transport.destroy();
   }
 
   get awareness(): awarenessProtocol.Awareness {
@@ -112,6 +113,7 @@ export class WebRTCProvider implements IRelayProvider {
     this.inner.on('synced', ({ synced }: { synced: boolean }) => {
       if (synced) {
         this.synced = true;
+        this._transport.onPeerConnected?.();
       }
       this.emitter.emit('synced', synced);
     });

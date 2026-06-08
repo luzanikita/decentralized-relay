@@ -23,6 +23,11 @@ import { reconnectProvider } from "./merge-hsm/integration/ProviderLifecycle";
 import { generateHash } from "./hashing";
 import { trackAsyncCleanup } from "./reloadUtils";
 import { trackPromise } from "./trackPromise";
+import { BulletinCheckpoint } from './bulletin/BulletinCheckpoint';
+import type { ISignalingTransport } from './signaling/ISignalingTransport';
+import { ResilientSignalingTransport } from './signaling/ResilientSignalingTransport';
+import type { BulletinSignalingTransport } from './signaling/BulletinSignalingTransport';
+import { DEFAULT_BULLETIN_SETTINGS } from './bulletin/types';
 
 export function isDocument(file?: IFile): file is Document {
 	return file instanceof Document;
@@ -57,6 +62,8 @@ export class Document extends HasProvider implements IFile, HasMimeType {
 	 */
 	private _hsm: MergeHSM | null;
 
+	private _bulletinCheckpoint: BulletinCheckpoint | null = null;
+
 	/**
 	 * ProviderIntegration instance for bridging HSM with the provider.
 	 * Created when lock is acquired, destroyed when released.
@@ -88,7 +95,7 @@ export class Document extends HasProvider implements IFile, HasMimeType {
 		const s3rn = parent.relayId
 			? new S3RemoteDocument(parent.relayId, parent.guid, guid)
 			: new S3Document(parent.guid, guid);
-		super(guid, s3rn, parent.tokenStore, loginManager);
+		super(guid, s3rn, parent.tokenStore, loginManager, parent.controlPlane);
 		this.timeProvider = parent.timeProvider;
 		this._parent = parent;
 		this.path = path;
@@ -250,8 +257,22 @@ export class Document extends HasProvider implements IFile, HasMimeType {
 		const doc = super.ensureRemoteDoc();
 		if (isNew) {
 			this.seedRemoteDocFromServerAdvertisedSnapshot(doc);
+			const bulletinClient = this._parent.bulletinClient;
+			if (bulletinClient) {
+				this._bulletinCheckpoint = new BulletinCheckpoint(doc, bulletinClient, this.guid);
+				void this._bulletinCheckpoint.fetchAndApply();
+			}
 		}
 		return doc;
+	}
+
+	destroyRemoteDoc(): void {
+		if (this._bulletinCheckpoint) {
+			void this._bulletinCheckpoint.checkpoint();
+			this._bulletinCheckpoint.destroy();
+			this._bulletinCheckpoint = null;
+		}
+		super.destroyRemoteDoc();
 	}
 
 	private seedRemoteDocFromServerAdvertisedSnapshot(remoteDoc: Y.Doc): void {
@@ -309,11 +330,11 @@ export class Document extends HasProvider implements IFile, HasMimeType {
 
 		// Create ProviderIntegration BEFORE awaiting so it can deliver
 		// PROVIDER_SYNCED during the entering phase (needed for empty-IDB flow).
-		if (!this._providerIntegration) {
+		if (!this._providerIntegration && this._provider) {
 			this._providerIntegration = new ProviderIntegration(
 				hsm,
 				remoteDoc,
-				this._provider! as YjsProvider,
+				this._provider as YjsProvider,
 				{ onSyncedRemoteHead: this.recordProviderSyncedRemoteHead },
 			);
 		}
@@ -633,6 +654,22 @@ export class Document extends HasProvider implements IFile, HasMimeType {
 
 	static checkExtension(vpath: string): boolean {
 		return vpath.endsWith(".md");
+	}
+
+	protected _buildSignalingTransport(): ISignalingTransport {
+		const bulletinClient = this._parent.bulletinClient;
+		if (!bulletinClient) {
+			return super._buildSignalingTransport();
+		}
+		const settings = {
+			...DEFAULT_BULLETIN_SETTINGS,
+			...(this._parent as any).bulletinSettings?.get?.(),
+		};
+		return new ResilientSignalingTransport(
+			settings,
+			bulletinClient,
+			(transport: BulletinSignalingTransport) => this._handleSignalingFallback(transport),
+		);
 	}
 
 	destroy() {

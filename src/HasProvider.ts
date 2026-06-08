@@ -11,9 +11,14 @@ import { User } from "./User";
 import { HasLogging } from "./debug";
 import { LoginManager } from "./LoginManager";
 import { LiveTokenStore } from "./LiveTokenStore";
-import type { ClientToken } from "./client/types";
+import type { IControlPlane, SessionParams } from './control-plane/IControlPlane';
 import { S3RN, type S3RNType } from "./S3RN";
 import type { TimeProvider } from "./TimeProvider";
+import type { ISignalingTransport } from "./signaling/ISignalingTransport";
+import { PublicSignalingTransport } from "./signaling/PublicSignalingTransport";
+import type { BulletinSignalingTransport } from "./signaling/BulletinSignalingTransport";
+
+const DEFERRED_DOC_ID = '-';
 
 export interface Subscription {
 	on: () => void;
@@ -21,16 +26,17 @@ export interface Subscription {
 }
 
 function makeProvider(
-	clientToken: ClientToken,
+	sessionParams: SessionParams,
 	ydoc: Y.Doc,
 	user: User | undefined,
 	_timeProvider: TimeProvider,
+	transport?: ISignalingTransport,
 ): IRelayProvider {
 	const provider = new WebRTCProvider(
-		clientToken.docId,
+		sessionParams.docId,
 		ydoc,
 		user ? { name: user.name } : undefined,
-		{ readOnly: clientToken.authorization === 'read-only' },
+		{ transport, readOnly: sessionParams.authorization === 'read-only' },
 	);
 
 	if (user) {
@@ -69,7 +75,9 @@ export class HasProvider extends HasLogging {
 	_provider: IRelayProvider | null = null;
 	path?: string;
 	private _ydoc: Y.Doc | null = null;
-	clientToken: ClientToken;
+	protected _signalingTransport: ISignalingTransport | null = null;
+	protected _destroyed = false;
+	sessionParams: SessionParams;
 	private _deferredDisconnectTimer: number | null = null;
 	private _deferredDisconnectStatusListener:
 		| ((state: ConnectionState) => void)
@@ -90,15 +98,22 @@ export class HasProvider extends HasLogging {
 		private _s3rn: S3RNType,
 		public tokenStore: LiveTokenStore,
 		public loginManager: LoginManager,
+		private _controlPlane: IControlPlane,
 	) {
 		super();
 		this.listeners = new Map<unknown, Listener>();
 		this.loginManager = loginManager;
-
 		this.tokenStore = tokenStore;
-		this.clientToken =
-			this.tokenStore.getTokenSync(S3RN.encode(this.s3rn)) ||
-			({ token: "", url: "", docId: "-", expiryTime: 0 } as ClientToken);
+
+		const cachedToken = this.tokenStore.getTokenSync(S3RN.encode(this.s3rn));
+		this.sessionParams = cachedToken
+			? {
+					docId: cachedToken.docId,
+					authorization: cachedToken.authorization ?? 'full',
+					relayUrl: cachedToken.url,
+					relayToken: cachedToken.token,
+				}
+			: { docId: DEFERRED_DOC_ID, authorization: 'full' };
 	}
 
 	/**
@@ -136,18 +151,29 @@ export class HasProvider extends HasLogging {
 			return this._ydoc;
 		}
 
-		const user = this.loginManager?.user;
 		this._ydoc = new Y.Doc();
 
+		if (this.sessionParams.docId !== DEFERRED_DOC_ID) {
+			this._createProvider();
+		}
+
+		return this._ydoc;
+	}
+
+	private _createProvider(): void {
+		if (this._provider || !this._ydoc) return;
+		const user = this.loginManager?.user;
+		this._signalingTransport = this._buildSignalingTransport();
 		this._provider = makeProvider(
-			this.clientToken,
+			this.sessionParams,
 			this._ydoc,
 			user,
 			this.timeProvider,
+			this._signalingTransport,
 		);
 		this._provider.beforeReconnect = async () => {
-			const clientToken = await this.getProviderToken();
-			this.refreshProvider(clientToken);
+			const sessionParams = await this.getSessionParams();
+			this.refreshProvider(sessionParams);
 		};
 
 		const connectionErrorSub = this.providerConnectionErrorSubscription(
@@ -179,8 +205,6 @@ export class HasProvider extends HasLogging {
 		);
 		stateSub.on();
 		this._offState = stateSub.off;
-
-		return this._ydoc;
 	}
 
 	/**
@@ -221,7 +245,7 @@ export class HasProvider extends HasLogging {
 	public set s3rn(value: S3RNType) {
 		this._s3rn = value;
 		if (this._provider) {
-			this.refreshProvider(this.clientToken);
+			this.refreshProvider(this.sessionParams);
 		}
 	}
 
@@ -243,48 +267,32 @@ export class HasProvider extends HasLogging {
 		this.listeners.delete(el);
 	}
 
-	async getProviderToken(): Promise<ClientToken> {
-		this.log("get provider token");
-
-		const tokenPromise = this.tokenStore.getToken(
-			S3RN.encode(this.s3rn),
-			this.path || "unknown",
-			this.refreshProvider.bind(this),
-		);
-		return tokenPromise;
+	async getSessionParams(): Promise<SessionParams> {
+		return this._controlPlane.getSession(S3RN.encode(this._s3rn));
 	}
 
 	providerActive() {
-		if (this.clientToken && this._provider) {
-			const tokenIsSet = this._provider.hasUrl(this.clientToken.url);
-			const expired = Date.now() > (this.clientToken?.expiryTime || 0);
-			return tokenIsSet && !expired;
-		}
-		return false;
+		return this._provider !== null && this.sessionParams.docId !== DEFERRED_DOC_ID;
 	}
 
-	refreshProvider(clientToken: ClientToken) {
-		// updates the provider when a new token is received
-		this.clientToken = clientToken;
+	refreshProvider(sessionParams: SessionParams) {
+		this.sessionParams = sessionParams;
 
 		if (!this._provider) {
-			// No provider yet - token will be used when ensureRemoteDoc() is called
 			return;
 		}
 
-		const result = this._provider.refreshToken(
-			clientToken.url,
-			clientToken.docId,
-			clientToken.token,
-			clientToken.authorization === "read-only",
-		);
-
-		if (result.urlChanged) {
-			const maskedUrl = result.newUrl.replace(
-				/token=[^&]+/,
-				"token=[REDACTED]",
+		if (sessionParams.relayUrl) {
+			const result = this._provider.refreshToken(
+				sessionParams.relayUrl,
+				sessionParams.docId,
+				sessionParams.relayToken ?? '',
+				sessionParams.authorization === 'read-only',
 			);
-			this.log(`Token Refreshed: setting new provider url, ${maskedUrl}`);
+			if (result.urlChanged) {
+				const maskedUrl = result.newUrl.replace(/token=[^&]+/, 'token=[REDACTED]');
+				this.log(`Token Refreshed: setting new provider url, ${maskedUrl}`);
+			}
 		}
 	}
 
@@ -296,12 +304,18 @@ export class HasProvider extends HasLogging {
 		if (this.connected) {
 			return Promise.resolve(true);
 		}
-		// Ensure remoteDoc exists before connecting
 		this.ensureRemoteDoc();
-		return this.getProviderToken()
-			.then((clientToken) => {
-				this.refreshProvider(clientToken); // XXX is this still needed?
-				this._provider!.connect();
+		return this.getSessionParams()
+			.then((sessionParams) => {
+				this.sessionParams = sessionParams;
+				if (!this._provider) {
+					this._createProvider();
+				} else {
+					this.refreshProvider(sessionParams);
+				}
+				if (this._provider) {
+					this._provider.connect();
+				}
 				this.notifyListeners();
 				return true;
 			})
@@ -361,13 +375,9 @@ export class HasProvider extends HasLogging {
 
 	public withActiveProvider<T extends HasProvider>(this: T): Promise<T> {
 		if (this.providerActive()) {
-			return new Promise((resolve) => {
-				resolve(this);
-			});
+			return Promise.resolve(this);
 		}
-		return this.getProviderToken().then((clientToken) => {
-			return this;
-		});
+		return this.getSessionParams().then(() => this);
 	}
 
 	onceConnected(): Promise<void> {
@@ -375,7 +385,11 @@ export class HasProvider extends HasLogging {
 		if (this.state.status === "connected") {
 			return Promise.resolve();
 		}
-		const provider = this._provider!;
+		if (!this._provider) {
+			// Deferred path: provider not yet created, trigger connect then retry
+			return this.connect().then(() => this.onceConnected());
+		}
+		const provider = this._provider;
 		return new Promise((resolve) => {
 			const resolveOnConnect = (state: ConnectionState) => {
 				if (state.status === "connected") {
@@ -392,7 +406,10 @@ export class HasProvider extends HasLogging {
 			return Promise.resolve();
 		}
 		this.ensureRemoteDoc();
-		const provider = this._provider!;
+		if (!this._provider) {
+			return this.connect().then(() => this.onceProviderSynced());
+		}
+		const provider = this._provider;
 		if (provider.synced) {
 			this._providerSynced = true;
 			return Promise.resolve();
@@ -467,12 +484,7 @@ export class HasProvider extends HasLogging {
 
 	reset() {
 		this.disconnect();
-		this.clientToken = {
-			token: "",
-			url: "",
-			docId: "-",
-			expiryTime: 0,
-		} as ClientToken;
+		this.sessionParams = { docId: DEFERRED_DOC_ID, authorization: 'full' };
 	}
 
 
@@ -512,7 +524,29 @@ export class HasProvider extends HasLogging {
 		return { on, off } as Subscription;
 	}
 
+	protected _buildSignalingTransport(): ISignalingTransport {
+		return new PublicSignalingTransport();
+	}
+
+	protected _handleSignalingFallback(newTransport: BulletinSignalingTransport): void {
+		const ydoc = this._ydoc;
+		if (!ydoc || this._destroyed) return;
+		this._provider?.destroy();
+		const user = this.loginManager?.user;
+		this._signalingTransport = newTransport;
+		this._provider = makeProvider(
+			this.sessionParams,
+			ydoc,
+			user,
+			this.timeProvider,
+			newTransport,
+		);
+		this._provider.connect();
+		this.notifyListeners();
+	}
+
 	destroy() {
+		this._destroyed = true;
 		this.destroyRemoteDoc();
 		this.loginManager = null as any;
 	}

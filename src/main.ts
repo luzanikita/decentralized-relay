@@ -91,6 +91,17 @@ import {
 	setPluginRequestConfig,
 } from "./customFetch";
 import { RelayDebugAPI } from "./RelayDebugAPI";
+import type { BulletinSettings } from './bulletin/types';
+import { DEFAULT_BULLETIN_SETTINGS } from './bulletin/types';
+import { BulletinClient } from './bulletin/BulletinClient';
+import type { IControlPlane } from './control-plane/IControlPlane';
+import { RelayControlPlane } from './control-plane/RelayControlPlane';
+import { BulletinControlPlane } from './control-plane/BulletinControlPlane';
+import { ChainConnection } from './chain/ChainConnection';
+import { AssetHubClient } from './asset-hub/AssetHubClient';
+import { PasskeyIdentity } from './passkey/PasskeyIdentity';
+import type { PasskeySettings } from './passkey/types';
+import { DEFAULT_PASSKEY_SETTINGS } from './passkey/types';
 
 interface DebugSettings {
 	debugging: boolean;
@@ -104,16 +115,18 @@ interface RelaySettings extends FeatureFlags, DebugSettings {
 	sharedFolders: SharedFolderSettings[];
 	release: ReleaseSettings;
 	endpoints: EndpointSettings;
+	bulletin: BulletinSettings;
+	passkey: PasskeySettings;
 }
 
 const DEFAULT_SETTINGS: RelaySettings = {
-	release: {
-		channel: "stable",
-	},
+	release: { channel: "stable" },
 	sharedFolders: [],
 	endpoints: {},
 	...FeatureFlagDefaults,
 	...DEFAULT_DEBUG_SETTINGS,
+	bulletin: DEFAULT_BULLETIN_SETTINGS,
+	passkey: DEFAULT_PASSKEY_SETTINGS,
 };
 
 type VaultDeleteEvent = {
@@ -156,6 +169,13 @@ export default class Live extends Plugin {
 	public releaseSettings!: NamespacedSettings<ReleaseSettings>;
 	public loginSettings!: NamespacedSettings<LoginSettings>;
 	public endpointSettings!: NamespacedSettings<EndpointSettings>;
+	public bulletinClient: BulletinClient | null = null;
+	public bulletinSettings!: NamespacedSettings<BulletinSettings>;
+	public passkeySettings!: NamespacedSettings<PasskeySettings>;
+	public passkeyIdentity: PasskeyIdentity | null = null;
+	public assetHubClient: AssetHubClient | null = null;
+	private _bulletinConnection: ChainConnection | null = null;
+	private _assetHubConnection: ChainConnection | null = null;
 	debug!: (...args: unknown[]) => void;
 	log!: (...args: unknown[]) => void;
 	warn!: (...args: unknown[]) => void;
@@ -554,6 +574,66 @@ export default class Live extends Plugin {
 		this.releaseSettings = new NamespacedSettings(this.settings, "release");
 		this.loginSettings = new NamespacedSettings(this.settings, "login");
 		this.endpointSettings = new NamespacedSettings(this.settings, "endpoints");
+		// One-time migration: move flat bulletin settings to nested structure
+		const rawData = this.settings.get() as any;
+		if (!rawData.bulletin && (rawData.bulletinEnabled !== undefined || rawData.bulletinRpcUrl !== undefined)) {
+			await this.settings.update((s: any) => {
+				const migrated = { ...s };
+				migrated.bulletin = {
+					enabled: s.bulletinEnabled ?? false,
+					rpcUrl: s.bulletinRpcUrl ?? '',
+					ipfsGateway: s.bulletinIpfsGateway ?? 'https://ipfs.io/ipfs/',
+					signalingUrls: s.signalingUrls ?? ['wss://signaling.y-webrtc.com'],
+					signalingFallbackTimeoutMs: s.signalingFallbackTimeoutMs ?? 8000,
+					controlPlaneEnabled: s.bulletinControlPlaneEnabled ?? false,
+					assetHubRpcUrl: s.assetHubRpcUrl ?? 'wss://westend-asset-hub-rpc.polkadot.io',
+				};
+				// Remove old flat keys to keep settings clean
+				delete migrated.bulletinEnabled;
+				delete migrated.bulletinRpcUrl;
+				delete migrated.bulletinIpfsGateway;
+				delete migrated.bulletinKeyfilePath;
+				delete migrated.bulletinKeyfilePassword;
+				delete migrated.bulletinControlPlaneEnabled;
+				delete migrated.signalingUrls;
+				delete migrated.signalingFallbackTimeoutMs;
+				delete migrated.assetHubRpcUrl;
+				return migrated;
+			});
+		}
+
+		this.bulletinSettings = new NamespacedSettings<BulletinSettings>(
+			this.settings,
+			'bulletin',
+		);
+		this.passkeySettings = new NamespacedSettings<PasskeySettings>(
+			this.settings,
+			'passkey',
+		);
+
+		const bSettings = this.bulletinSettings.get();
+		const pSettings = this.passkeySettings.get();
+
+		this._assetHubConnection = new ChainConnection(
+			bSettings.assetHubRpcUrl || 'wss://westend-asset-hub-rpc.polkadot.io',
+		);
+		this.assetHubClient = new AssetHubClient(this._assetHubConnection);
+
+		this.passkeyIdentity = new PasskeyIdentity(
+			pSettings,
+			(updated) => this.passkeySettings.update(() => updated),
+			this.assetHubClient,
+			(() => { try { return require('electron').safeStorage; } catch { return null as any; } })(),
+		);
+
+		if (bSettings.enabled && bSettings.rpcUrl) {
+			this._bulletinConnection = new ChainConnection(bSettings.rpcUrl);
+			this.bulletinClient = new BulletinClient(
+				this._bulletinConnection,
+				this.passkeyIdentity.getDeviceSigner.bind(this.passkeyIdentity),
+				bSettings.ipfsGateway,
+			);
+		}
 
 		const flagManager = FeatureFlagManager.getInstance();
 		flagManager.setSettings(this.featureSettings);
@@ -1034,11 +1114,21 @@ export default class Live extends Plugin {
 			folderSettings,
 			this._hsmStore,
 			this.timeProvider,
+			this._buildControlPlane(),
 			relayId,
 			authoritative,
 			remote,
 		);
+		folder.bulletinClient = this.bulletinClient;
 		return folder;
+	}
+
+	private _buildControlPlane(): IControlPlane {
+		const settings = this.bulletinSettings?.get?.() ?? {} as BulletinSettings;
+		if (settings.controlPlaneEnabled) {
+			return new BulletinControlPlane();
+		}
+		return new RelayControlPlane(this.tokenStore);
 	}
 
 	private _onLogout() {
@@ -1795,6 +1885,25 @@ export default class Live extends Plugin {
 			this.endpointSettings.destroy();
 		});
 		this.endpointSettings = null as any;
+		teardownStep("bulletinClient.destroy", () => {
+			this.bulletinClient?.destroy();
+			this.bulletinClient = null;
+		});
+		teardownStep("assetHubClient.destroy", () => {
+			this.assetHubClient?.destroy();
+			this.assetHubClient = null;
+		});
+		this.passkeyIdentity = null;
+		teardownStep("bulletinSettings.destroy", () => {
+			this.bulletinSettings?.destroy();
+		});
+		teardownStep("passkeySettings.destroy", () => {
+			this.passkeySettings?.destroy();
+		});
+		this.bulletinSettings = null as any;
+		this.passkeySettings = null as any;
+		this._bulletinConnection = null;
+		this._assetHubConnection = null;
 		teardownStep("settings.destroy", () => {
 			this.settings.destroy();
 		});

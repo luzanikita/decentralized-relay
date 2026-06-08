@@ -93,7 +93,7 @@ export class Canvas extends HasProvider implements IFile, HasMimeType {
 		const s3rn = parent.relayId
 			? new S3RemoteCanvas(parent.relayId, parent.guid, guid)
 			: new S3Canvas(parent.guid, guid);
-		super(guid, s3rn, parent.tokenStore, loginManager);
+		super(guid, s3rn, parent.tokenStore, loginManager, parent.controlPlane);
 		this.timeProvider = parent.timeProvider;
 		this._parent = parent;
 		this.path = path;

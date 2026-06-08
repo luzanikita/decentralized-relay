@@ -13,6 +13,7 @@
 	import { handleServerError } from "../utils/toastStore";
 	import { Platform } from "obsidian";
 	import Announcement from "./Announcement.svelte";
+	import BulletinSettingsSection from "./BulletinSettingsSection.svelte";
 
 	interface RelayEventDetail {
 		relay: Relay;
@@ -318,6 +319,7 @@
 			></Relays>
 		</LoggedIn>
 	{/if}
+	<BulletinSettingsSection {plugin} />
 </div>
 
 <ToastManager />

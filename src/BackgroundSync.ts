@@ -1578,7 +1578,11 @@ export class BackgroundSync extends HasLogging {
 			throw new Error(`Unable to decode S3RN: ${S3RN.encode(entity)}`);
 		}
 
-		const clientToken = await item.getProviderToken();
+		const clientToken = await item.tokenStore.getToken(
+			S3RN.encode(entity),
+			item.path || 'unknown',
+			() => {},
+		);
 		const headers = this.getAuthHeader(clientToken);
 		const baseUrl = this.getBaseUrl(clientToken, entity);
 		const url = `${baseUrl}/as-update`;
