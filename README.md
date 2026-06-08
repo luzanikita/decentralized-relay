@@ -124,7 +124,7 @@ classDiagram
         +removeProxy(deviceAddress, masterSigner) Promise~void~
         +getProxies(masterAddress) Promise~ProxyEntry[]~
         +addFolderMember(folderAddress, memberAddress, role, folderSigner) Promise~void~
-        +removeFolderMember(folderAddress, memberAddress, folderSigner) Promise~void~
+        +removeFolderMember(folderAddress, memberAddress, role, folderSigner) Promise~void~
         +getFolderMembers(folderAddress) Promise~FolderMember[]~
         +destroy() void
     }
@@ -289,6 +289,26 @@ classDiagram
 | `src/main.ts` | Added `_buildControlPlane()` private method (returns `BulletinControlPlane` or `RelayControlPlane` based on settings); passes result to `SharedFolder` constructor |
 | `src/BackgroundSync.ts` | Replaced stale `getProviderToken()` call with direct `tokenStore.getToken()` (relay-only download path) |
 
+**Phase 6 — On-chain membership:**
+
+| File | Change |
+|---|---|
+| `src/asset-hub/types.ts` | Added `FolderMember` interface (`masterAccount: string`, `role: 'full' \| 'read-only'`) |
+| `src/asset-hub/AssetHubClient.ts` | Added `addFolderMember`, `removeFolderMember` (role-aware), `getFolderMembers` — wrap `Proxy.add_proxy` / `remove_proxy` / `Proxies` storage calls on the folder account |
+| `src/asset-hub/__tests__/asset-hub-client.test.ts` | +7 unit tests for new folder-member methods (total: 12) |
+| `src/acl/InviteCode.ts` | **New.** `encodeInvite` / `decodeInvite` (base64url) + `validateInvite` (expiry + sr25519 signature via `signatureVerify`) + `canonicalPayload` (sorted-key JSON, excludes `sig`) |
+| `src/acl/__tests__/invite-code.test.ts` | **New.** 8 unit tests (round-trip, bad sig, expiry, canonical stability) |
+| `src/passkey/PasskeyIdentity.ts` | Extracted `_getMasterSeed()`; refactored `_hkdf` to accept `info` param; added `getFolderAccountSigner(folderId)` (HKDF from master seed + folder UUID), `setupFolderAccount(folderId)` → ss58 address, `generateInvite(folderId, folderAccountAddress, role, expiresInMs?)` |
+| `src/passkey/__tests__/passkey-identity.test.ts` | +5 unit tests for three new methods (total: 15) |
+| `src/control-plane/IControlPlane.ts` | Added `NotAuthorizedError` class |
+| `src/control-plane/BulletinControlPlane.ts` | Changed constructor to accept 3 injected deps (`assetHubClient`, `getMyMasterAccountId`, `getFolderAccountAddress`); `getSession` now performs ACL check — owner path (no `folderAccountAddress`) returns `full`; ACL path reads proxy list and throws `NotAuthorizedError` if caller absent |
+| `src/control-plane/__tests__/bulletin-control-plane.test.ts` | Replaced with 11 tests covering owner path, ACL path (full / read-only / unauthorized / null identity), and destroy |
+| `src/acl/JoinRequestMonitor.ts` | **New.** Subscribes to `BulletinClient.subscribeToStoredCids`; validates shape + folder match + invite signature; fires `onRequest` callback; idempotent `start()` / `stop()` |
+| `src/acl/__tests__/join-request-monitor.test.ts` | **New.** 6 unit tests (valid request fires, non-join-request skipped, unknown folder skipped, bad sig skipped, stop unsubscribes, start idempotent) |
+| `src/SharedFolder.ts` | Added `folderAccountAddress?: string` to `SharedFolderSettings`; `get folderAccountAddress()` and `updateFolderAccountAddress()` on `SharedFolder` |
+| `src/main.ts` | `_buildControlPlane` now accepts `folderSettings` and wires per-folder address lookup; added `_joinRequestMonitor` field + `pendingJoinRequests: Writable<JoinRequest[]>` store; `JoinRequestMonitor` started after `bulletinClient` init; torn down before `assetHubClient` |
+| `src/components/BulletinSettingsSection.svelte` | Full replacement: per-folder ACL section (setup button → address → invite / member list / revoke / join-request banners) + existing Passkey Identity section |
+
 **Phase 5 — Passkey identity:**
 
 | File | Change |
@@ -383,13 +403,13 @@ gantt
     BulletinClient signerFactory refactor      :done, 2026-06, 1d
     4-state passkey settings UI                :done, 2026-06, 1d
 
-    section Phase 6 — On-chain membership
-    Folder account HKDF key derivation     :active, 2026-06, 7d
-    InviteCode encode / decode / validate  :2026-06, 5d
-    AssetHubClient folder-member methods   :2026-06, 3d
-    BulletinControlPlane ACL proxy check   :2026-06, 5d
-    JoinRequestMonitor                     :2026-06, 5d
-    Per-folder ACL settings UI             :2026-06, 7d
+    section Phase 6 — On-chain membership (done)
+    Folder account HKDF key derivation     :done, 2026-06, 7d
+    InviteCode encode / decode / validate  :done, 2026-06, 5d
+    AssetHubClient folder-member methods   :done, 2026-06, 3d
+    BulletinControlPlane ACL proxy check   :done, 2026-06, 5d
+    JoinRequestMonitor                     :done, 2026-06, 5d
+    Per-folder ACL settings UI             :done, 2026-06, 7d
 
     section Phase 7 — Gas management
     Self-funded path (user holds tokens)   :2026-10, 14d
@@ -525,7 +545,7 @@ Benefits over Phase 2's keyfile approach:
 
 **Architecture note:** The Proxy Pallet lives on **Asset Hub** (not Bulletin Chain), so `AssetHubClient` and `BulletinClient` each hold an independent `ChainConnection`. Both connections are created eagerly on plugin load; `BulletinClient` is only instantiated if `bulletin.enabled && bulletin.rpcUrl` are set.
 
-### Phase 6 — On-chain membership (in progress)
+### Phase 6 — On-chain membership ✓ done
 
 Per-folder access control enforced at `getSession()` time via the Asset Hub Proxy Pallet — no relay server, no custom pallet, free storage reads.
 
@@ -540,6 +560,7 @@ Per-folder access control enforced at `getSession()` time via the Asset Hub Prox
 ```mermaid
 sequenceDiagram
     participant Alice
+    participant UI as Settings UI
     participant PI as PasskeyIdentity
     participant Bob
     participant BC as BulletinClient
@@ -547,21 +568,23 @@ sequenceDiagram
     participant AH as AssetHubClient
     participant AHC as westend-asset-hub
 
-    Alice->>PI: generateInvite(folderId, 'full')
+    Alice->>UI: click "Invite (Full)"
+    UI->>PI: generateInvite(folderId, folderAccountAddress, 'full')
     PI->>Alice: biometric prompt
-    PI-->>Alice: base64url invite code
+    PI-->>UI: base64url invite code (copied to clipboard)
     Alice-->>Bob: share out-of-band
 
-    Bob->>BC: store(join-request payload)
+    Bob->>BC: store(join-request JSON payload)
     JRM->>BC: subscribeToStoredCids
-    JRM->>BC: fetch(CID) + parse
-    JRM->>JRM: validate sig + expiry, match folderAccountAddress
-    JRM->>Alice: notify via pendingJoinRequests
-    Alice-->>JRM: Approve (settings UI)
-    JRM->>PI: getFolderAccountSigner(folderId)
+    JRM->>BC: fetch(CID) + parse JSON
+    JRM->>JRM: isJoinRequest? folderAccountAddress matches? sig valid?
+    JRM->>UI: pendingJoinRequests.update([…, req])
+    UI->>Alice: join-request banner (requester + role)
+    Alice->>UI: click Approve
+    UI->>PI: getFolderAccountSigner(folderId)
     PI->>Alice: biometric prompt
-    PI-->>JRM: folderSigner
-    JRM->>AH: addFolderMember(folderAccountAddress, bobMaster, 'full', folderSigner)
+    PI-->>UI: folderSigner
+    UI->>AH: addFolderMember(folderAccountAddress, bobMaster, role, folderSigner)
     AH->>AHC: Proxy.add_proxy tx (signed by folder account)
 ```
 
@@ -583,7 +606,7 @@ The plugin code path is identical — `BulletinClient.store()` checks subscripti
 ```bash
 npm install
 npm run build   # tsc + esbuild (develop profile)
-npm test        # jest unit tests (~100 tests across WebRTC, Bulletin Chain, signaling, passkey, asset-hub, and control-plane layers)
+npm test        # jest unit tests (~129 tests across WebRTC, Bulletin Chain, signaling, passkey, asset-hub, control-plane, ACL, and invite-code layers)
 ```
 
 The encrypted test files copied from the upstream repo (`__tests__/**` except `src/client/__tests__/`) require the upstream git-crypt key and cannot be run in this fork without it.
