@@ -21,6 +21,10 @@ jest.mock('@polkadot-api/signer', () => ({
   getPolkadotSigner: jest.fn().mockImplementation((publicKey: Uint8Array) => ({ publicKey })),
 }));
 
+jest.mock('@polkadot/util', () => ({
+  u8aToHex: jest.fn().mockImplementation((bytes: Uint8Array) => '0x' + Buffer.from(bytes).toString('hex')),
+}));
+
 jest.mock('@polkadot/util-crypto', () => ({
   encodeAddress: jest.fn().mockImplementation((bytes: Uint8Array) => '5G' + Buffer.from(bytes).toString('hex').slice(0, 10)),
 }));
@@ -187,5 +191,85 @@ describe('PasskeyIdentity.getDeviceSigner()', () => {
   test('throws when no device key is stored', async () => {
     const identity = new PasskeyIdentity(makeSettings(), jest.fn(), mockAssetHubClient as any, require('electron').safeStorage);
     await expect(identity.getDeviceSigner()).rejects.toThrow('No device key');
+  });
+});
+
+describe('PasskeyIdentity.getFolderAccountSigner()', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('returns a deterministic signer for the same folderId', async () => {
+    global.navigator = { credentials: { get: makeCredentialsGet(PRF_RESULT_FIRST) } } as any;
+    const identity = new PasskeyIdentity(
+      makeSettings({ credentialId: FAKE_CREDENTIAL_ID }),
+      jest.fn(), mockAssetHubClient as any, require('electron').safeStorage,
+    );
+    const s1 = await identity.getFolderAccountSigner('folder-a');
+
+    global.navigator = { credentials: { get: makeCredentialsGet(PRF_RESULT_FIRST) } } as any;
+    const identity2 = new PasskeyIdentity(
+      makeSettings({ credentialId: FAKE_CREDENTIAL_ID }),
+      jest.fn(), mockAssetHubClient as any, require('electron').safeStorage,
+    );
+    const s2 = await identity2.getFolderAccountSigner('folder-a');
+    expect(Buffer.from(s1.publicKey).toString('hex')).toBe(Buffer.from(s2.publicKey).toString('hex'));
+  });
+
+  test('different folderIds produce different signers', async () => {
+    global.navigator = { credentials: { get: makeCredentialsGet(PRF_RESULT_FIRST) } } as any;
+    const identity = new PasskeyIdentity(
+      makeSettings({ credentialId: FAKE_CREDENTIAL_ID }),
+      jest.fn(), mockAssetHubClient as any, require('electron').safeStorage,
+    );
+    const sA = await identity.getFolderAccountSigner('folder-a');
+
+    global.navigator = { credentials: { get: makeCredentialsGet(PRF_RESULT_FIRST) } } as any;
+    const identity2 = new PasskeyIdentity(
+      makeSettings({ credentialId: FAKE_CREDENTIAL_ID }),
+      jest.fn(), mockAssetHubClient as any, require('electron').safeStorage,
+    );
+    const sB = await identity2.getFolderAccountSigner('folder-b');
+    expect(Buffer.from(sA.publicKey).toString('hex')).not.toBe(Buffer.from(sB.publicKey).toString('hex'));
+  });
+});
+
+describe('PasskeyIdentity.setupFolderAccount()', () => {
+  test('returns ss58 address string', async () => {
+    global.navigator = { credentials: { get: makeCredentialsGet() } } as any;
+    const identity = new PasskeyIdentity(
+      makeSettings({ credentialId: FAKE_CREDENTIAL_ID }),
+      jest.fn(), mockAssetHubClient as any, require('electron').safeStorage,
+    );
+    const address = await identity.setupFolderAccount('folder-uuid');
+    expect(typeof address).toBe('string');
+    expect(address.length).toBeGreaterThan(0);
+  });
+});
+
+describe('PasskeyIdentity.generateInvite()', () => {
+  test('returns a non-empty string', async () => {
+    global.navigator = { credentials: { get: makeCredentialsGet() } } as any;
+    const identity = new PasskeyIdentity(
+      makeSettings({ credentialId: FAKE_CREDENTIAL_ID }),
+      jest.fn(), mockAssetHubClient as any, require('electron').safeStorage,
+    );
+    const code = await identity.generateInvite('folder-uuid', '5GFolderAddr', 'full');
+    expect(typeof code).toBe('string');
+    expect(code.length).toBeGreaterThan(0);
+  });
+
+  test('produced invite code decodes with correct fields', async () => {
+    global.navigator = { credentials: { get: makeCredentialsGet() } } as any;
+    const identity = new PasskeyIdentity(
+      makeSettings({ credentialId: FAKE_CREDENTIAL_ID }),
+      jest.fn(), mockAssetHubClient as any, require('electron').safeStorage,
+    );
+    const code = await identity.generateInvite('folder-uuid', '5GFolderAddr', 'read-only', 0);
+    const { decodeInvite } = await import('../../acl/InviteCode');
+    const invite = decodeInvite(code);
+    expect(invite.v).toBe(1);
+    expect(invite.folderId).toBe('folder-uuid');
+    expect(invite.role).toBe('read-only');
+    expect(invite.expiresAt).toBe(0);
+    expect(typeof invite.sig).toBe('string');
   });
 });

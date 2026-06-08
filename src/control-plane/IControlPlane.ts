@@ -11,3 +11,10 @@ export interface IControlPlane {
   getSession(resourceId: string): Promise<SessionParams>;
   destroy(): void;
 }
+
+export class NotAuthorizedError extends Error {
+  constructor(folderId: string) {
+    super(`Not authorized to access folder ${folderId}`);
+    this.name = 'NotAuthorizedError';
+  }
+}
