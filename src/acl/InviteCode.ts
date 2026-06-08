@@ -1,4 +1,5 @@
-import { signatureVerify, hexToU8a } from '@polkadot/util-crypto';
+import { hexToU8a } from '@polkadot/util';
+import { signatureVerify } from '@polkadot/util-crypto';
 
 export interface InviteCode {
   v: 1;
@@ -11,11 +12,9 @@ export interface InviteCode {
 }
 
 export function canonicalPayload(invite: Omit<InviteCode, 'sig'>): string {
-  const keys = (Object.keys(invite) as Array<keyof typeof invite>)
-    .filter((k) => k !== 'sig')
-    .sort();
+  const src = invite as Record<string, unknown>;
   const obj: Record<string, unknown> = {};
-  for (const k of keys) obj[k] = invite[k];
+  for (const k of Object.keys(src).filter(k => k !== 'sig').sort()) obj[k] = src[k];
   return JSON.stringify(obj);
 }
 
