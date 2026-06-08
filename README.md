@@ -34,20 +34,20 @@ graph LR
     T -->|primary| D[signaling.y-webrtc.com]
     T -->|fallback after 8s| BST[BulletinSignalingTransport]
     BST -->|local bridge| LWS[ws://127.0.0.1:PORT]
-    C -->|ICE candidates via transport.signalingUrls| D
     C -->|document data + CID gossip| E[Other peers]
+    C -->|ICE candidates via transport.signalingUrls| D
     D -.->|stateless, content-blind| E
     B -.->|optional| F[BulletinCheckpoint]
     F -->|snapshot every 50 edits| G[BulletinClient]
     G -->|PAPI tx| H[bulletin-westend]
     G -.->|fetch CID on open| I[IPFS gateway]
     BST --> G
-    PK[PasskeyIdentity] -->|device signer| G
-    PK -->|addProxy / removeProxy / getFolderAccountSigner| AH[AssetHubClient]
     AH -->|Proxy Pallet| AHC[westend-asset-hub]
     B -->|getSession| BCP[BulletinControlPlane]
-    BCP -->|getFolderMembers — free storage read| AH
     JRM[JoinRequestMonitor] -->|subscribeToStoredCids + fetch| G
+    PK[PasskeyIdentity] -->|device signer| G
+    BCP -->|getFolderMembers — free storage read| AH
+    PK -->|addProxy / removeProxy / getFolderAccountSigner| AH[AssetHubClient]
 ```
 
 Document content travels peer-to-peer. The signaling server sees only room names (= doc IDs) and ICE candidates — never document data. `ResilientSignalingTransport` tries the public server first; if no peer connects within 8 seconds it switches to a local WebSocket bridge backed by the Bulletin Chain. All signaling paths are optional and disabled by default without a configured Bulletin Chain keypair. `BulletinControlPlane` verifies folder membership by reading the proxy list on Asset Hub — a free storage read, no tx required. `JoinRequestMonitor` watches Bulletin Chain for signed join-request payloads and fires a callback for the folder owner to approve.
