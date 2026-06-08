@@ -1126,7 +1126,11 @@ export default class Live extends Plugin {
 	private _buildControlPlane(): IControlPlane {
 		const settings = this.bulletinSettings?.get?.() ?? {} as BulletinSettings;
 		if (settings.controlPlaneEnabled) {
-			return new BulletinControlPlane();
+			return new BulletinControlPlane(
+				this.assetHubClient!,
+				() => this.passkeySettings?.get?.()?.masterAccountId ?? null,
+				(_folderId: string) => null, // TODO(Task 6): wire per-folder account address
+			);
 		}
 		return new RelayControlPlane(this.tokenStore);
 	}
