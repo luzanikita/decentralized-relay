@@ -158,6 +158,15 @@ describe('AssetHubClient', () => {
     expect(members[0].role).toBe('read-only');
   });
 
+  test('getFolderMembers maps Any → read-only (legacy compat)', async () => {
+    mockProxiesGetValue.mockResolvedValue([
+      [{ delegate: new Uint8Array(32).fill(5), proxy_type: { type: 'Any' }, delay: 0 }],
+    ]);
+    const client = new AssetHubClient(mockChainConnection as any);
+    const members = await client.getFolderMembers('5GFolderAddr');
+    expect(members[0].role).toBe('read-only');
+  });
+
   test('getFolderMembers returns empty array when no proxies', async () => {
     mockProxiesGetValue.mockResolvedValue([[]]);
     const client = new AssetHubClient(mockChainConnection as any);
