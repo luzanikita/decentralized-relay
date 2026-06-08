@@ -90,4 +90,78 @@ describe('AssetHubClient', () => {
     client.destroy();
     expect(mockChainConnection.destroy).toHaveBeenCalledTimes(1);
   });
+
+  test('addFolderMember maps full → NonTransfer', async () => {
+    const client = new AssetHubClient(mockChainConnection as any);
+    const folderSigner = { publicKey: new Uint8Array(32) } as any;
+    await client.addFolderMember('5GFolderAddr', '5GMemberAddr', 'full', folderSigner);
+    expect(mockProxyAdd).toHaveBeenCalledWith({
+      delegate: { type: 'Id', value: '5GMemberAddr' },
+      proxy_type: 'NonTransfer',
+      delay: 0,
+    });
+    expect(mockAddProxySignAndSubmit).toHaveBeenCalledWith(folderSigner);
+  });
+
+  test('addFolderMember maps read-only → Governance', async () => {
+    const client = new AssetHubClient(mockChainConnection as any);
+    const folderSigner = { publicKey: new Uint8Array(32) } as any;
+    await client.addFolderMember('5GFolderAddr', '5GMemberAddr', 'read-only', folderSigner);
+    expect(mockProxyAdd).toHaveBeenCalledWith({
+      delegate: { type: 'Id', value: '5GMemberAddr' },
+      proxy_type: 'Governance',
+      delay: 0,
+    });
+  });
+
+  test('removeFolderMember maps full → NonTransfer', async () => {
+    const client = new AssetHubClient(mockChainConnection as any);
+    const folderSigner = { publicKey: new Uint8Array(32) } as any;
+    await client.removeFolderMember('5GFolderAddr', '5GMemberAddr', 'full', folderSigner);
+    expect(mockProxyRemove).toHaveBeenCalledWith({
+      delegate: { type: 'Id', value: '5GMemberAddr' },
+      proxy_type: 'NonTransfer',
+      delay: 0,
+    });
+    expect(mockRemoveProxySignAndSubmit).toHaveBeenCalledWith(folderSigner);
+  });
+
+  test('removeFolderMember maps read-only → Governance', async () => {
+    const client = new AssetHubClient(mockChainConnection as any);
+    const folderSigner = { publicKey: new Uint8Array(32) } as any;
+    await client.removeFolderMember('5GFolderAddr', '5GMemberAddr', 'read-only', folderSigner);
+    expect(mockProxyRemove).toHaveBeenCalledWith({
+      delegate: { type: 'Id', value: '5GMemberAddr' },
+      proxy_type: 'Governance',
+      delay: 0,
+    });
+    expect(mockRemoveProxySignAndSubmit).toHaveBeenCalledWith(folderSigner);
+  });
+
+  test('getFolderMembers maps NonTransfer → full', async () => {
+    mockProxiesGetValue.mockResolvedValue([
+      [{ delegate: new Uint8Array(32).fill(3), proxy_type: { type: 'NonTransfer' }, delay: 0 }],
+    ]);
+    const client = new AssetHubClient(mockChainConnection as any);
+    const members = await client.getFolderMembers('5GFolderAddr');
+    expect(members).toHaveLength(1);
+    expect(members[0].role).toBe('full');
+    expect(typeof members[0].masterAccount).toBe('string');
+  });
+
+  test('getFolderMembers maps Governance → read-only', async () => {
+    mockProxiesGetValue.mockResolvedValue([
+      [{ delegate: new Uint8Array(32).fill(4), proxy_type: { type: 'Governance' }, delay: 0 }],
+    ]);
+    const client = new AssetHubClient(mockChainConnection as any);
+    const members = await client.getFolderMembers('5GFolderAddr');
+    expect(members[0].role).toBe('read-only');
+  });
+
+  test('getFolderMembers returns empty array when no proxies', async () => {
+    mockProxiesGetValue.mockResolvedValue([[]]);
+    const client = new AssetHubClient(mockChainConnection as any);
+    const members = await client.getFolderMembers('5GFolderAddr');
+    expect(members).toHaveLength(0);
+  });
 });
