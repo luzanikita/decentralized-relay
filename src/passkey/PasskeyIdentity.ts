@@ -53,7 +53,7 @@ export class PasskeyIdentity {
   }
 
   async setupDeviceKey(masterSigner: PolkadotSigner): Promise<void> {
-    if (!this.safeStorage.isEncryptionAvailable()) {
+    if (!this.safeStorage || !this.safeStorage.isEncryptionAvailable()) {
       throw new Error('OS secure storage unavailable — passkey identity requires Electron safeStorage');
     }
 
@@ -75,6 +75,7 @@ export class PasskeyIdentity {
   async getDeviceSigner(): Promise<PolkadotSigner> {
     if (!this.settings.deviceKeyEncrypted) throw new Error('No device key configured');
     const encrypted = Buffer.from(this.settings.deviceKeyEncrypted, 'base64');
+    if (!this.safeStorage) throw new Error('OS secure storage unavailable — cannot decrypt device key');
     const hex = this.safeStorage.decryptString(encrypted);
     const deviceSeed = Buffer.from(hex, 'hex');
     const keyring = new Keyring({ type: 'sr25519' });

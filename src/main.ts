@@ -574,6 +574,34 @@ export default class Live extends Plugin {
 		this.releaseSettings = new NamespacedSettings(this.settings, "release");
 		this.loginSettings = new NamespacedSettings(this.settings, "login");
 		this.endpointSettings = new NamespacedSettings(this.settings, "endpoints");
+		// One-time migration: move flat bulletin settings to nested structure
+		const rawData = this.settings.get() as any;
+		if (!rawData.bulletin && (rawData.bulletinEnabled !== undefined || rawData.bulletinRpcUrl !== undefined)) {
+			await this.settings.update((s: any) => {
+				const migrated = { ...s };
+				migrated.bulletin = {
+					enabled: s.bulletinEnabled ?? false,
+					rpcUrl: s.bulletinRpcUrl ?? '',
+					ipfsGateway: s.bulletinIpfsGateway ?? 'https://ipfs.io/ipfs/',
+					signalingUrls: s.signalingUrls ?? ['wss://signaling.y-webrtc.com'],
+					signalingFallbackTimeoutMs: s.signalingFallbackTimeoutMs ?? 8000,
+					controlPlaneEnabled: s.bulletinControlPlaneEnabled ?? false,
+					assetHubRpcUrl: s.assetHubRpcUrl ?? 'wss://westend-asset-hub-rpc.polkadot.io',
+				};
+				// Remove old flat keys to keep settings clean
+				delete migrated.bulletinEnabled;
+				delete migrated.bulletinRpcUrl;
+				delete migrated.bulletinIpfsGateway;
+				delete migrated.bulletinKeyfilePath;
+				delete migrated.bulletinKeyfilePassword;
+				delete migrated.bulletinControlPlaneEnabled;
+				delete migrated.signalingUrls;
+				delete migrated.signalingFallbackTimeoutMs;
+				delete migrated.assetHubRpcUrl;
+				return migrated;
+			});
+		}
+
 		this.bulletinSettings = new NamespacedSettings<BulletinSettings>(
 			this.settings,
 			'bulletin',
@@ -1865,6 +1893,7 @@ export default class Live extends Plugin {
 			this.assetHubClient?.destroy();
 			this.assetHubClient = null;
 		});
+		this.passkeyIdentity = null;
 		teardownStep("bulletinSettings.destroy", () => {
 			this.bulletinSettings?.destroy();
 		});
@@ -1875,7 +1904,6 @@ export default class Live extends Plugin {
 		this.passkeySettings = null as any;
 		this._bulletinConnection = null;
 		this._assetHubConnection = null;
-		this.passkeyIdentity = null;
 		teardownStep("settings.destroy", () => {
 			this.settings.destroy();
 		});
