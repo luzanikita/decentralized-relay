@@ -42,9 +42,15 @@ graph LR
     G -->|PAPI tx| H[bulletin-westend]
     G -.->|fetch CID on open| I[IPFS gateway]
     BST --> G
+    PK[PasskeyIdentity] -->|device signer| G
+    PK -->|addProxy / removeProxy / getFolderAccountSigner| AH[AssetHubClient]
+    AH -->|Proxy Pallet| AHC[westend-asset-hub]
+    B -->|getSession| BCP[BulletinControlPlane]
+    BCP -->|getFolderMembers — free storage read| AH
+    JRM[JoinRequestMonitor] -->|subscribeToStoredCids + fetch| G
 ```
 
-Document content travels peer-to-peer. The signaling server sees only room names (= doc IDs) and ICE candidates — never document data. `ResilientSignalingTransport` tries the public server first; if no peer connects within 8 seconds it switches to a local WebSocket bridge backed by the Bulletin Chain. All signaling paths are optional and disabled by default without a configured Bulletin Chain keypair.
+Document content travels peer-to-peer. The signaling server sees only room names (= doc IDs) and ICE candidates — never document data. `ResilientSignalingTransport` tries the public server first; if no peer connects within 8 seconds it switches to a local WebSocket bridge backed by the Bulletin Chain. All signaling paths are optional and disabled by default without a configured Bulletin Chain keypair. `BulletinControlPlane` verifies folder membership by reading the proxy list on Asset Hub — a free storage read, no tx required. `JoinRequestMonitor` watches Bulletin Chain for signed join-request payloads and fires a callback for the folder owner to approve.
 
 ### Provider swap
 
@@ -105,13 +111,55 @@ classDiagram
         Read-only guard via Y.Doc listener
     }
 
+    class ChainConnection {
+        +connect() Promise~void~
+        +getClient() Client
+        +destroy() void
+        +state State
+    }
+
+    class AssetHubClient {
+        +connect() Promise~void~
+        +addProxy(deviceAddress, masterSigner) Promise~void~
+        +removeProxy(deviceAddress, masterSigner) Promise~void~
+        +getProxies(masterAddress) Promise~ProxyEntry[]~
+        +addFolderMember(folderAddress, memberAddress, role, folderSigner) Promise~void~
+        +removeFolderMember(folderAddress, memberAddress, folderSigner) Promise~void~
+        +getFolderMembers(folderAddress) Promise~FolderMember[]~
+        +destroy() void
+    }
+
+    class PasskeyIdentity {
+        +register() Promise~void~
+        +getMasterSigner() Promise~PolkadotSigner~
+        +setupDeviceKey(masterSigner) Promise~void~
+        +getDeviceSigner() Promise~PolkadotSigner~
+        +getFolderAccountSigner(folderId) Promise~PolkadotSigner~
+        +setupFolderAccount(folderId) Promise~string~ address
+        +generateInvite(folderId, folderAccountAddress, role, expiresInMs?) Promise~string~
+    }
+
+    class InviteCode {
+        v: 1
+        folderId: string
+        folderAccountAddress: string
+        ownerMasterAccountId: string
+        role: full|read-only
+        expiresAt: number
+        sig: string hex
+    }
+
+    class JoinRequestMonitor {
+        +start() void
+        +stop() void
+    }
+
     class BulletinClient {
-        +settings BulletinSettings
-        +accountId string
         +connect() Promise~void~
         +store(data) Promise~string~ CID
         +fetch(cid) Promise~Uint8Array~
         +subscribeToStoredCids(cb) unsubscribe
+        +accountId string
         +destroy() void
     }
 
@@ -122,6 +170,14 @@ classDiagram
         +destroy() void
     }
 
+    ChainConnection <-- BulletinClient : connection
+    ChainConnection <-- AssetHubClient : connection
+    AssetHubClient <-- PasskeyIdentity : addProxy / removeProxy / getFolderAccountSigner
+    PasskeyIdentity --> BulletinClient : signerFactory (device key)
+    PasskeyIdentity --> InviteCode : canonicalPayload + encodeInvite
+    BulletinControlPlane --> AssetHubClient : getFolderMembers
+    JoinRequestMonitor --> BulletinClient : subscribeToStoredCids + fetch
+    JoinRequestMonitor --> InviteCode : decodeInvite + validateInvite
     ISignalingTransport <|.. PublicSignalingTransport
     ISignalingTransport <|.. BulletinSignalingTransport
     ISignalingTransport <|.. ResilientSignalingTransport
@@ -147,9 +203,9 @@ classDiagram
     }
 
     class BulletinControlPlane {
-        No network call
         docId = blake2(folderId:docId)
-        authorization always full
+        owner path: authorization = full (no folderAccountAddress)
+        ACL path: reads proxy list; throws NotAuthorizedError if absent
     }
 
     IControlPlane <|.. RelayControlPlane
@@ -233,6 +289,26 @@ classDiagram
 | `src/main.ts` | Added `_buildControlPlane()` private method (returns `BulletinControlPlane` or `RelayControlPlane` based on settings); passes result to `SharedFolder` constructor |
 | `src/BackgroundSync.ts` | Replaced stale `getProviderToken()` call with direct `tokenStore.getToken()` (relay-only download path) |
 
+**Phase 5 — Passkey identity:**
+
+| File | Change |
+|---|---|
+| `.papi/metadata/westend_asset_hub.scale` | **New.** PAPI descriptor for Westend Asset Hub (Proxy Pallet) |
+| `.papi/polkadot-api.json` | Added `westend_asset_hub` chain entry |
+| `src/chain/ChainConnection.ts` | **New.** Shared WS + PAPI state machine (`idle → connecting → connected | failed`); concurrent-connect guard via `_connectPromise` |
+| `src/chain/__tests__/chain-connection.test.ts` | **New.** 8 unit tests (reconnect, concurrent-connect, failure) |
+| `src/asset-hub/AssetHubClient.ts` | **New.** Wraps Westend Asset Hub via PAPI; `addProxy` / `removeProxy` / `getProxies` on the Proxy Pallet |
+| `src/asset-hub/types.ts` | **New.** `ProxyEntry` type |
+| `src/asset-hub/__tests__/asset-hub-client.test.ts` | **New.** 9 unit tests for `AssetHubClient` |
+| `src/passkey/types.ts` | **New.** `PasskeySettings` interface + `DEFAULT_PASSKEY_SETTINGS`; `ElectronSafeStorage` interface |
+| `src/passkey/PasskeyIdentity.ts` | **New.** `register()` — WebAuthn credential with PRF extension; `getMasterSigner()` — PRF eval → HKDF-SHA-256 → sr25519 seed; `setupDeviceKey()` — generates device sr25519, calls `AssetHubClient.addProxy`, stores encrypted seed in OS safeStorage; `getDeviceSigner()` — decrypts from safeStorage |
+| `src/passkey/__tests__/passkey-identity.test.ts` | **New.** 19 unit tests (mocked WebAuthn, safeStorage, AssetHubClient) |
+| `src/bulletin/BulletinClient.ts` | Refactored: now accepts `ChainConnection` + `signerFactory: () => Promise<PolkadotSigner>` instead of keyfile settings; removed `accountId` getter (signer identity now owned by `PasskeyIdentity`) |
+| `src/bulletin/__tests__/bulletin-client.test.ts` | Updated to match refactored constructor |
+| `src/bulletin/types.ts` | Added `assetHubRpcUrl: string`; removed `keyfilePath`/`password` fields; renamed `bulletinControlPlaneEnabled` → `controlPlaneEnabled` |
+| `src/main.ts` | `RelaySettings` now has nested `bulletin: BulletinSettings` and `passkey: PasskeySettings` namespaces; `onload()` builds `ChainConnection` → `AssetHubClient` → `PasskeyIdentity` unconditionally; `BulletinClient` created with `passkeyIdentity.getDeviceSigner` as `signerFactory` when enabled |
+| `src/components/BulletinSettingsSection.svelte` | Replaced keyfile path + password inputs with 4-state passkey identity UI (unregistered → registered → device configured → ready) |
+
 ### Behaviour mapping
 
 | YSweetProvider behaviour | WebRTCProvider equivalent |
@@ -254,7 +330,7 @@ classDiagram
 
 | Limitation | Detail |
 |---|---|
-| **No transport-level auth** | Room name = `sessionParams.docId` (non-guessable GUID for relay path; blake2 hash for bulletin path). Any peer who learns the docId can join. The signaling server is public and content-blind. |
+| **No transport-level auth** | Room name = `sessionParams.docId` (non-guessable GUID for relay path; blake2 hash for bulletin path). Any peer who learns the docId can join WebRTC. On-chain ACL (Phase 6) verifies membership at session-open time, but WebRTC itself has no server to eject unauthorised peers. |
 | **Read-only not enforced** | WebRTC is symmetric — there is no server to reject writes from read-only clients. `WebRTCProvider` logs a `console.error` when a local write occurs on a read-only token. Full enforcement requires a gated signaling server. |
 | **No encryption** | y-webrtc supports a `password` option (AES-CBC) that is not yet wired up. Until then, informal privacy depends entirely on docId non-guessability. |
 
@@ -300,15 +376,20 @@ gantt
     BulletinControlPlane (docId from blake2) :done, 2026-06, 1d
     HasProvider wiring                 :done, 2026-06, 1d
 
-    section Phase 5 — Passkey identity
-    WebAuthn PRF → sr25519 master account  :2026-08, 21d
-    Ephemeral session key (proxy pallet)   :2026-08, 14d
-    Remove keyfile / plaintext password    :2026-08, 7d
+    section Phase 5 — Passkey identity (done)
+    ChainConnection shared WS state machine    :done, 2026-06, 1d
+    AssetHubClient Proxy Pallet addProxy       :done, 2026-06, 1d
+    PasskeyIdentity PRF + HKDF + safeStorage   :done, 2026-06, 1d
+    BulletinClient signerFactory refactor      :done, 2026-06, 1d
+    4-state passkey settings UI                :done, 2026-06, 1d
 
     section Phase 6 — On-chain membership
-    Folder ACL records on bulletin chain   :2026-09, 21d
-    Invite flow via signed chain tx        :2026-09, 14d
-    BulletinControlPlane reads ACL         :2026-09, 14d
+    Folder account HKDF key derivation     :active, 2026-06, 7d
+    InviteCode encode / decode / validate  :2026-06, 5d
+    AssetHubClient folder-member methods   :2026-06, 3d
+    BulletinControlPlane ACL proxy check   :2026-06, 5d
+    JoinRequestMonitor                     :2026-06, 5d
+    Per-folder ACL settings UI             :2026-06, 7d
 
     section Phase 7 — Gas management
     Self-funded path (user holds tokens)   :2026-10, 14d
@@ -397,30 +478,94 @@ Two implementations ship in this phase:
 
 A single settings flag (`bulletinControlPlaneEnabled`) picks one at construction time. The relay server becomes optional rather than mandatory. `BackgroundSync` and `LiveTokenStore` are untouched — they continue to serve the relay HTTP file-sync path unchanged.
 
-### Phase 5 — Passkey identity
+### Phase 5 — Passkey identity ✓ done
 
-Replace the keyfile + plaintext password UX with hardware-backed biometric authentication.
+Replaces the keyfile + plaintext password UX with hardware-backed biometric authentication.
 
-**How it works:** The WebAuthn PRF extension asks the device's secure enclave (Touch ID, Face ID, Windows Hello) to produce a deterministic 32-byte secret from a fixed salt. Those bytes are treated as a Polkadot seed to derive a **master sr25519 account** — no seed phrase written to disk, no JSON file to manage. On a new device, the user touches their fingerprint and the same master account is reconstructed.
+**How it works:** `PasskeyIdentity` uses the WebAuthn PRF extension to ask the device's secure enclave (Touch ID, Face ID, Windows Hello) for a deterministic 32-byte output given a fixed salt. HKDF-SHA-256 stretches those bytes into an sr25519 seed — the **master account**. No seed phrase is written to disk; on a new device the user touches their fingerprint and the same master account is reconstructed.
 
-On startup, `BulletinClient` generates a fresh ephemeral **session key** (`sr25519`) in memory. A single biometric prompt authorises the master account to register the session key as a proxy via the Bulletin Chain's native Proxy Pallet (`proxy.add_proxy`). From that point all `store()` calls are signed by the in-memory session key and submitted as `proxy.proxy` calls — the master key is never touched again during the session.
+The master key is needed only once per device: `setupDeviceKey()` generates a fresh sr25519 **device key**, calls `AssetHubClient.addProxy()` to register the device key as a `NonTransfer` proxy on Westend Asset Hub, then encrypts the device seed with Electron's OS-level `safeStorage` API. From that point all `BulletinClient.store()` calls are signed by the device key retrieved from `safeStorage` — the biometric prompt is not needed again.
+
+```mermaid
+sequenceDiagram
+    participant User as User (biometric)
+    participant PI as PasskeyIdentity
+    participant AH as AssetHubClient
+    participant Chain as westend-asset-hub
+    participant SS as OS safeStorage
+    participant BC as BulletinClient
+
+    Note over User,BC: First-time setup (one biometric prompt)
+    User->>PI: register()
+    PI->>User: WebAuthn credential (PRF enabled)
+    User->>PI: setupDeviceKey(masterSigner)
+    PI->>PI: getMasterSigner() — PRF eval → HKDF → sr25519
+    PI->>PI: generate random device sr25519 seed
+    PI->>AH: addProxy(deviceAddress, masterSigner)
+    AH->>Chain: Proxy.add_proxy tx
+    PI->>SS: encryptString(deviceSeed hex)
+    PI->>PI: save credentialId + deviceKeyEncrypted + deviceAccountId
+
+    Note over User,BC: Every subsequent session (no biometric)
+    BC->>PI: signerFactory() → getDeviceSigner()
+    PI->>SS: decryptString(deviceKeyEncrypted)
+    SS-->>PI: device seed
+    PI-->>BC: PolkadotSigner (device key)
+    BC->>Chain: store() signed by device key
+```
 
 Benefits over Phase 2's keyfile approach:
 
 | | Phase 2 (keyfile) | Phase 5 (passkey) |
 |---|---|---|
-| Secret storage | `.json` file on disk, password in `data.json` | Never leaves hardware enclave |
-| New device | Copy keyfile manually | Touch fingerprint |
-| Stolen laptop | Keyfile + password at risk | Session key only; revoke via any other device |
-| UX friction | Configure path + password in settings | One biometric prompt on first use |
+| Secret storage | `.json` file on disk, password in `data.json` | Master seed never leaves hardware enclave |
+| New device | Copy keyfile manually | Touch fingerprint once |
+| Stolen laptop | Keyfile + password at risk | Device key only; revoke by calling `removeProxy` from any other device |
+| UX friction | Configure path + password in settings | 4-state UI: unregistered → registered → device key set → ready |
 
-### Phase 6 — On-chain membership
+**Architecture note:** The Proxy Pallet lives on **Asset Hub** (not Bulletin Chain), so `AssetHubClient` and `BulletinClient` each hold an independent `ChainConnection`. Both connections are created eagerly on plugin load; `BulletinClient` is only instantiated if `bulletin.enabled && bulletin.rpcUrl` are set.
 
-Move folder access control from the relay server to the Bulletin Chain. The folder owner posts a signed membership record on-chain: `{ folder: guid, members: [accountA, accountB], role: 'full' | 'read-only' }`. `BulletinControlPlane.getSession()` reads this record to populate `authorization` rather than hardcoding `'full'`.
+### Phase 6 — On-chain membership (in progress)
 
-Invitation flow: owner broadcasts a signed `add_member` transaction. Revocation: owner broadcasts an updated membership list. No relay server API calls involved.
+Per-folder access control enforced at `getSession()` time via the Asset Hub Proxy Pallet — no relay server, no custom pallet, free storage reads.
 
-At this point `BulletinControlPlane` requires no server contact at all — room name is derived locally, authorization is read from chain state.
+**Folder accounts.** For each shared folder, Alice derives a dedicated sr25519 **folder account** deterministically from her master seed using a second HKDF pass keyed on the folder UUID. The address is cached in `SharedFolderSettings.folderAccountAddress`; any device with a single biometric touch reconstructs the same keypair.
+
+**Membership.** Authorised members are registered as proxies of the folder account. Proxy type encodes role by convention: `NonTransfer → full`, `Governance → read-only`. `AssetHubClient.addFolderMember` / `removeFolderMember` / `getFolderMembers` wrap the relevant `Proxy.add_proxy` / `remove_proxy` / `Proxies` storage calls.
+
+**`BulletinControlPlane` ACL check.** If `folderAccountAddress` is absent the existing owner path applies (`authorization: 'full'`, no network call). If it is set, `getFolderMembers(folderAccountAddress)` runs on every `getSession()` call and the caller's master account is looked up in the result. A missing entry throws `NotAuthorizedError`, which `HasProvider` surfaces in `SyncStatusView`.
+
+**Invite flow.**
+
+```mermaid
+sequenceDiagram
+    participant Alice
+    participant PI as PasskeyIdentity
+    participant Bob
+    participant BC as BulletinClient
+    participant JRM as JoinRequestMonitor
+    participant AH as AssetHubClient
+    participant AHC as westend-asset-hub
+
+    Alice->>PI: generateInvite(folderId, 'full')
+    PI->>Alice: biometric prompt
+    PI-->>Alice: base64url invite code
+    Alice-->>Bob: share out-of-band
+
+    Bob->>BC: store(join-request payload)
+    JRM->>BC: subscribeToStoredCids
+    JRM->>BC: fetch(CID) + parse
+    JRM->>JRM: validate sig + expiry, match folderAccountAddress
+    JRM->>Alice: notify via pendingJoinRequests
+    Alice-->>JRM: Approve (settings UI)
+    JRM->>PI: getFolderAccountSigner(folderId)
+    PI->>Alice: biometric prompt
+    PI-->>JRM: folderSigner
+    JRM->>AH: addFolderMember(folderAccountAddress, bobMaster, 'full', folderSigner)
+    AH->>AHC: Proxy.add_proxy tx (signed by folder account)
+```
+
+`JoinRequestMonitor` silently discards payloads that are not `join-request` shaped, reference an unknown folder, or carry an invalid / expired invite signature. The UI shows a banner per pending request with Approve / Deny buttons.
 
 ### Phase 7 — Gas management
 
@@ -438,7 +583,7 @@ The plugin code path is identical — `BulletinClient.store()` checks subscripti
 ```bash
 npm install
 npm run build   # tsc + esbuild (develop profile)
-npm test        # jest unit tests (60 tests across WebRTC, Bulletin Chain, and signaling layers)
+npm test        # jest unit tests (~100 tests across WebRTC, Bulletin Chain, signaling, passkey, asset-hub, and control-plane layers)
 ```
 
 The encrypted test files copied from the upstream repo (`__tests__/**` except `src/client/__tests__/`) require the upstream git-crypt key and cannot be run in this fork without it.
