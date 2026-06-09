@@ -41,6 +41,9 @@ graph LR
     F -->|snapshot every 50 edits| G[BulletinClient]
     G -->|PAPI tx| H[bulletin-westend]
     G -.->|fetch CID on open| I[IPFS gateway]
+    G -.->|checkBalance — top-up bg| RC[RelayerClient]
+    RC -->|HTTPS /faucet-grant /top-up-now| RB[Relayer Backend]
+    RB -->|transfer_keep_alive| H
     BST --> G
     AH -->|Proxy Pallet| AHC[westend-asset-hub]
     B -->|getSession| BCP[BulletinControlPlane]
@@ -117,6 +120,7 @@ classDiagram
         +destroy() void
         +state State
     }
+    ChainConnection <-- BulletinClient : connection
 
     class AssetHubClient {
         +connect() Promise~void~
@@ -138,6 +142,9 @@ classDiagram
         +setupFolderAccount(folderId) Promise~string~ address
         +generateInvite(folderId, folderAccountAddress, role, expiresInMs?) Promise~string~
     }
+    SharedFolder o-- BulletinClient : bulletinClient
+    PasskeyIdentity --> InviteCode : canonicalPayload + encodeInvite
+    JoinRequestMonitor --> InviteCode : decodeInvite + validateInvite
 
     class InviteCode {
         v: 1
@@ -158,9 +165,19 @@ classDiagram
         +connect() Promise~void~
         +store(data) Promise~string~ CID
         +fetch(cid) Promise~Uint8Array~
+        +getBalance() Promise~bigint~
+        +checkBalance() Promise~void~
+        +onLowBalance(cb) unsubscribe
+        +cachedBalance bigint|null
         +subscribeToStoredCids(cb) unsubscribe
         +accountId string
         +destroy() void
+    }
+
+    class RelayerClient {
+        +requestFaucetGrant(masterAccount, chainNetworkId) Promise~FaucetResult~
+        +topUpNow() Promise~TopUpResult~
+        +getStatus() Promise~StatusResult|null~
     }
 
     class BulletinCheckpoint {
@@ -170,18 +187,15 @@ classDiagram
         +destroy() void
     }
 
-    ChainConnection <-- BulletinClient : connection
     ChainConnection <-- AssetHubClient : connection
     AssetHubClient <-- PasskeyIdentity : addProxy / removeProxy / getFolderAccountSigner
     PasskeyIdentity --> BulletinClient : signerFactory (device key)
-    PasskeyIdentity --> InviteCode : canonicalPayload + encodeInvite
     BulletinControlPlane --> AssetHubClient : getFolderMembers
     JoinRequestMonitor --> BulletinClient : subscribeToStoredCids + fetch
-    JoinRequestMonitor --> InviteCode : decodeInvite + validateInvite
-    ISignalingTransport <|.. PublicSignalingTransport
-    ISignalingTransport <|.. BulletinSignalingTransport
-    ISignalingTransport <|.. ResilientSignalingTransport
     ResilientSignalingTransport --> PublicSignalingTransport : primary
+    ISignalingTransport <|.. PublicSignalingTransport
+    ISignalingTransport <|.. ResilientSignalingTransport
+    ISignalingTransport <|.. BulletinSignalingTransport
     ResilientSignalingTransport --> BulletinSignalingTransport : fallback
     IRelayProvider <|.. WebRTCProvider : now
     class IControlPlane {
@@ -215,10 +229,10 @@ classDiagram
     HasProvider --> IRelayProvider : _provider
     HasProvider --> ISignalingTransport : _signalingTransport
     WebRTCProvider --> ISignalingTransport : _transport
-    SharedFolder o-- BulletinClient : bulletinClient
     Document o-- BulletinCheckpoint : _bulletinCheckpoint
     BulletinCheckpoint --> BulletinClient : store / fetch
     BulletinSignalingTransport --> BulletinClient : store / fetch / subscribe
+    BulletinClient --> RelayerClient : checkBalance (bg top-up / faucet)
 ```
 
 ### Files changed
@@ -412,9 +426,11 @@ gantt
     Per-folder ACL settings UI             :done, 2026-06, 7d
 
     section Phase 7 — Gas management
-    Self-funded path (user holds tokens)   :2026-10, 14d
-    Subscription relayer (company pays gas):2026-10, 21d
-    UX indistinguishable between both      :2026-10, 7d
+    RelayerClient + BulletinClient balance methods :2026-06, 7d
+    Free-tier faucet grant (one-time registration) :2026-06, 7d
+    Paid subscription auto top-up (low-balance)    :2026-06, 14d
+    Gas management settings UI                    :2026-06, 7d
+    Relayer backend (Rust/Axum)                   :2026-06, 21d
 ```
 
 ### Phase 2 — Persistence (Polkadot Bulletin Chain) ✓ done
@@ -592,12 +608,15 @@ sequenceDiagram
 
 ### Phase 7 — Gas management
 
-The Bulletin Chain charges a small transaction fee for each `store()` call. Two funding paths coexist, and the user experience is identical either way:
+The Bulletin Chain charges a small transaction fee for each `store()` call. Two funding paths coexist; the user never touches crypto either way, and `BulletinClient.store()` always submits directly to the chain RPC regardless of which path is active.
 
-- **Self-funded:** the user's master Passkey account holds chain tokens and pays gas directly. No subscription required; works entirely without the relay service.
-- **Subscription relayer:** instead of broadcasting directly to the chain RPC, the plugin sends the signed payload to the relay service's backend over HTTPS. The backend verifies the active subscription, wraps the payload in its own gas-paying envelope, and submits it. The user pays a flat monthly fee in fiat (Stripe/Apple Pay) and never touches crypto.
+**Free tier (testnet):** A one-time faucet grant funds the device account at registration. No subscription or purchase required. The backend is contacted exactly once — to make the grant — and has no further involvement in sync.
 
-The plugin code path is identical — `BulletinClient.store()` checks subscription status and routes accordingly. Cancelling a subscription doesn't lock users out; they switch to the self-funded path automatically. The relay service never holds document content — only the signed payload envelope it forwards to the chain.
+*Tradeoffs:* The free tier runs on the bulletin-westend testnet. Testnet chains can reset, which would erase stored snapshots; persistence is best-effort rather than guaranteed. The grant covers months of typical use and can be refreshed once per 30 days.
+
+**Paid tier (production):** A flat monthly subscription keeps the device account topped up automatically. When the balance drops below a threshold, the plugin triggers a refill in the background — sync is never blocked. Chain submissions still go directly from the plugin to the chain RPC.
+
+The payment backend's role is narrowly scoped to **account funding only**. It holds no document content, no cryptographic keys, and no signatures. It cannot read or modify sync state. Cancelling a subscription does not lock users out — the device account retains whatever balance remains, and the free tier or direct self-funding are always available as fallbacks.
 
 ---
 
