@@ -44,6 +44,9 @@ graph LR
     G -.->|checkBalance — top-up bg| RC[RelayerClient]
     RC -->|HTTPS /faucet-grant /top-up-now| RB[Relayer Backend]
     RB -->|transfer_keep_alive| H
+    PK -.->|signRawBytes — free tier| PFC[PublicFaucetClient]
+    PFC -->|POST sig-auth| WF[public faucet]
+    WF -.->|drip| H
     BST --> G
     AH -->|Proxy Pallet| AHC[westend-asset-hub]
     B -->|getSession| BCP[BulletinControlPlane]
@@ -138,6 +141,7 @@ classDiagram
         +getMasterSigner() Promise~PolkadotSigner~
         +setupDeviceKey(masterSigner) Promise~void~
         +getDeviceSigner() Promise~PolkadotSigner~
+        +signRawBytes(input) Promise~Uint8Array~
         +getFolderAccountSigner(folderId) Promise~PolkadotSigner~
         +setupFolderAccount(folderId) Promise~string~ address
         +generateInvite(folderId, folderAccountAddress, role, expiresInMs?) Promise~string~
@@ -178,6 +182,13 @@ classDiagram
         +requestFaucetGrant(masterAccount, chainNetworkId) Promise~FaucetResult~
         +topUpNow() Promise~TopUpResult~
         +getStatus() Promise~StatusResult|null~
+    }
+
+    class PublicFaucetClient {
+        +WESTEND PublicFaucetNetwork
+        +PASEO PublicFaucetNetwork
+        +forRpcUrl(url) PublicFaucetNetwork
+        +requestFaucetGrant() Promise~FaucetResult~
     }
 
     class BulletinCheckpoint {
@@ -233,6 +244,7 @@ classDiagram
     BulletinCheckpoint --> BulletinClient : store / fetch
     BulletinSignalingTransport --> BulletinClient : store / fetch / subscribe
     BulletinClient --> RelayerClient : checkBalance (bg top-up / faucet)
+    PasskeyIdentity --> PublicFaucetClient : signRawBytes (free-tier direct faucet)
 ```
 
 ### Files changed
@@ -315,6 +327,15 @@ classDiagram
 | `src/main.ts` | Constructs `RelayerClient` when `relayerUrl` is set; passes it to `BulletinClient` with `tier` and `BigInt(lowBalanceThreshold)`; calls `checkBalance()` on startup; nulls `relayerClient` on teardown |
 | `src/components/BulletinSettingsSection.svelte` | Added balance display, free-tier faucet button, paid-subscription status panel, relayer URL + token + threshold fields |
 | `jest.config.js` | Fixed `testPathIgnorePatterns` to allow tests to run inside `.claude/worktrees/` |
+
+**Phase 7 — Direct public faucet (Westend/Paseo):**
+
+| File | Change |
+|---|---|
+| `src/passkey/PasskeyIdentity.ts` | Added `signRawBytes(input): Promise<Uint8Array>` — raw sr25519 signing without wrapping in a `PolkadotSigner` |
+| `src/bulletin/PublicFaucetClient.ts` | **New.** `forRpcUrl` detects Westend vs Paseo from RPC URL; signature-authenticated POST to the public faucet endpoint; NDJSON response parsed for success / quota / error |
+| `src/bulletin/__tests__/public-faucet-client.test.ts` | **New.** 10 unit tests: network detection, all result paths, POST body shape, signBytes delegation |
+| `src/components/BulletinSettingsSection.svelte` | Branching faucet path (uses `PublicFaucetClient` when no `relayerClient`); `formatToken` replaces hardcoded `formatPlanck` (symbol + decimals from `networkConfig`); RPC preset buttons; "Get free tokens" enabled without a configured relayer |
 
 **Phase 6 — On-chain membership:**
 
@@ -623,9 +644,9 @@ sequenceDiagram
 
 The Bulletin Chain charges a small transaction fee for each `store()` call. Two funding paths coexist; the user never touches crypto either way, and `BulletinClient.store()` always submits directly to the chain RPC regardless of which path is active.
 
-**Free tier (testnet):** A one-time faucet grant funds the device account at registration. No subscription or purchase required. The backend is contacted exactly once — to make the grant — and has no further involvement in sync.
+**Free tier (testnet):** `PublicFaucetClient` requests tokens directly from the public Westend or Paseo faucet — no relayer backend required. The plugin signs a `faucet:<address>:<timestamp>` message with the device key via `PasskeyIdentity.signRawBytes` and POSTs the sr25519 signature to the faucet endpoint. The token network (WND / PAS, 12 / 10 decimals) is auto-detected from the configured RPC URL; balance and budget displays update accordingly. The RPC URL setting gains Westend / Paseo preset buttons for quick network switching.
 
-*Tradeoffs:* The free tier runs on the bulletin-westend testnet. Testnet chains can reset, which would erase stored snapshots; persistence is best-effort rather than guaranteed. The grant covers months of typical use and can be refreshed once per 30 days.
+*Tradeoffs:* The free tier runs on the bulletin-westend / paseo testnet. Testnet chains can reset, which would erase stored snapshots; persistence is best-effort rather than guaranteed. The public faucet allows one grant per day.
 
 **Paid tier (production):** A flat monthly subscription keeps the device account topped up automatically. When the balance drops below a threshold, the plugin triggers a refill in the background — sync is never blocked. Chain submissions still go directly from the plugin to the chain RPC.
 
@@ -638,7 +659,7 @@ The payment backend's role is narrowly scoped to **account funding only**. It ho
 ```bash
 npm install
 npm run build   # tsc + esbuild (develop profile)
-npm test        # jest unit tests (~183 tests across WebRTC, Bulletin Chain, signaling, passkey, asset-hub, control-plane, ACL, invite-code, and gas management layers)
+npm test        # jest unit tests (~193 tests across WebRTC, Bulletin Chain, signaling, passkey, asset-hub, control-plane, ACL, invite-code, gas management, and public faucet layers)
 ```
 
 The encrypted test files copied from the upstream repo (`__tests__/**` except `src/client/__tests__/`) require the upstream git-crypt key and cannot be run in this fork without it.
