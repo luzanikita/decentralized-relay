@@ -94,6 +94,7 @@ import { RelayDebugAPI } from "./RelayDebugAPI";
 import type { BulletinSettings } from './bulletin/types';
 import { DEFAULT_BULLETIN_SETTINGS } from './bulletin/types';
 import { BulletinClient } from './bulletin/BulletinClient';
+import { RelayerClient } from './bulletin/RelayerClient';
 import type { IControlPlane } from './control-plane/IControlPlane';
 import { RelayControlPlane } from './control-plane/RelayControlPlane';
 import { BulletinControlPlane } from './control-plane/BulletinControlPlane';
@@ -172,6 +173,7 @@ export default class Live extends Plugin {
 	public loginSettings!: NamespacedSettings<LoginSettings>;
 	public endpointSettings!: NamespacedSettings<EndpointSettings>;
 	public bulletinClient: BulletinClient | null = null;
+	public relayerClient: RelayerClient | null = null;
 	public bulletinSettings!: NamespacedSettings<BulletinSettings>;
 	public passkeySettings!: NamespacedSettings<PasskeySettings>;
 	public passkeyIdentity: PasskeyIdentity | null = null;
@@ -632,10 +634,18 @@ export default class Live extends Plugin {
 
 		if (bSettings.enabled && bSettings.rpcUrl) {
 			this._bulletinConnection = new ChainConnection(bSettings.rpcUrl);
+			const relayerClient = bSettings.relayerUrl
+				? new RelayerClient(bSettings.relayerUrl, bSettings.subscriptionToken || undefined)
+				: undefined;
+			this.relayerClient = relayerClient ?? null;
+			const tier: 'free' | 'paid' = bSettings.subscriptionToken ? 'paid' : 'free';
 			this.bulletinClient = new BulletinClient(
 				this._bulletinConnection,
 				this.passkeyIdentity.getDeviceSigner.bind(this.passkeyIdentity),
 				bSettings.ipfsGateway,
+				relayerClient,
+				BigInt(bSettings.lowBalanceThreshold),
+				tier,
 			);
 		}
 
@@ -652,6 +662,11 @@ export default class Live extends Plugin {
 				},
 			);
 			this._joinRequestMonitor.start();
+		}
+
+		// Check balance on startup; fires paid top-up in background if needed
+		if (this.bulletinClient) {
+			this.bulletinClient.checkBalance().catch(() => { /* non-fatal */ });
 		}
 
 		const flagManager = FeatureFlagManager.getInstance();
@@ -1920,6 +1935,7 @@ export default class Live extends Plugin {
 		teardownStep("bulletinClient.destroy", () => {
 			this.bulletinClient?.destroy();
 			this.bulletinClient = null;
+			this.relayerClient = null;
 		});
 		teardownStep("assetHubClient.destroy", () => {
 			this.assetHubClient?.destroy();

@@ -5,6 +5,7 @@ import { encodeAddress } from '@polkadot/util-crypto';
 import type { PolkadotSigner } from 'polkadot-api';
 import { bulletin } from '../../.papi/descriptors/dist/index.js';
 import type { ChainConnection } from '../chain/ChainConnection';
+import type { RelayerClient } from './RelayerClient';
 
 const RAW_CODEC = 0x55;
 const BLAKE2B_256 = 0xb220;
@@ -13,11 +14,16 @@ export class BulletinClient {
   private _typedApi: any = null;
   private _signer: PolkadotSigner | null = null;
   private _connectPromise: Promise<void> | null = null;
+  private _cachedBalance: bigint | null = null;
+  private _lowBalanceCbs: Array<() => void> = [];
 
   constructor(
     private readonly connection: ChainConnection,
     private readonly signerFactory: () => Promise<PolkadotSigner>,
     private readonly ipfsGateway: string,
+    private readonly relayerClient?: RelayerClient,
+    private readonly lowBalanceThreshold: bigint = 1_000_000_000_000n,
+    private readonly tier: 'free' | 'paid' = 'free',
   ) {}
 
   async connect(): Promise<void> {
@@ -44,6 +50,35 @@ export class BulletinClient {
     const cid = await this._computeCid(data);
     await this._submitStore(data);
     return cid;
+  }
+
+  async getBalance(): Promise<bigint> {
+    await this.connect();
+    const accountInfo = await this._typedApi.query.System.Account.getValue(this.accountId);
+    const balance = accountInfo.data.free as bigint;
+    this._cachedBalance = balance;
+    return balance;
+  }
+
+  get cachedBalance(): bigint | null {
+    return this._cachedBalance;
+  }
+
+  async checkBalance(): Promise<void> {
+    const balance = await this.getBalance();
+    if (balance >= this.lowBalanceThreshold) return;
+    if (this.tier === 'paid' && this.relayerClient) {
+      this.relayerClient.topUpNow().catch(() => { /* fire-and-forget; non-fatal */ });
+    } else {
+      this._lowBalanceCbs.forEach((cb) => cb());
+    }
+  }
+
+  onLowBalance(cb: () => void): () => void {
+    this._lowBalanceCbs.push(cb);
+    return () => {
+      this._lowBalanceCbs = this._lowBalanceCbs.filter((x) => x !== cb);
+    };
   }
 
   private async _computeCid(data: Uint8Array): Promise<string> {
@@ -126,6 +161,8 @@ export class BulletinClient {
     this._typedApi = null;
     this._signer = null;
     this._connectPromise = null;
+    this._cachedBalance = null;
+    this._lowBalanceCbs = [];
     this.connection.destroy();
   }
 }
