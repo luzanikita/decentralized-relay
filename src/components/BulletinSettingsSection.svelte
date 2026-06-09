@@ -14,6 +14,75 @@
   let isLoading = false;
   let error = '';
 
+  // Gas management state
+  let cachedBalance: bigint | null = null;
+  let relayerStatus: import('src/bulletin/RelayerClient').StatusResult | null = null;
+  let gasLoading = false;
+  let gasMessage = '';
+
+  $: tier = settings.subscriptionToken ? 'paid' : 'free';
+  $: relayerConfigured = !!settings.relayerUrl;
+
+  function formatPlanck(planck: bigint): string {
+    // WND has 12 decimal places; display with 4 decimal places
+    const whole = planck / 1_000_000_000_000n;
+    const frac = ((planck % 1_000_000_000_000n) * 10000n) / 1_000_000_000_000n;
+    return `${whole}.${frac.toString().padStart(4, '0')} WND`;
+  }
+
+  async function refreshBalance() {
+    if (!plugin.bulletinClient) return;
+    try {
+      cachedBalance = await plugin.bulletinClient.getBalance();
+    } catch { /* non-fatal */ }
+  }
+
+  async function refreshStatus() {
+    if (!plugin.relayerClient) return;
+    try {
+      relayerStatus = await plugin.relayerClient.getStatus();
+    } catch { /* non-fatal */ }
+  }
+
+  async function handleRequestFaucetGrant() {
+    if (!plugin.relayerClient) return;
+    const masterAccount = passkeySettings.masterAccountId;
+    if (!masterAccount) { gasMessage = 'Register a passkey first.'; return; }
+    gasLoading = true;
+    gasMessage = '';
+    try {
+      const result = await plugin.relayerClient.requestFaucetGrant(masterAccount, 'bulletin-westend');
+      if (result.ok) {
+        gasMessage = "Account funded — you're ready to use Bulletin Chain persistence.";
+        await refreshBalance();
+      } else if (result.reason === 'rate_limited') {
+        gasMessage = 'Already granted — testnet tokens cover months of usage. Check back in 30 days.';
+      } else {
+        gasMessage = 'Faucet unavailable — try again later.';
+      }
+    } finally {
+      gasLoading = false;
+    }
+  }
+
+  async function handleActivatePaid() {
+    gasLoading = true;
+    gasMessage = '';
+    try {
+      await refreshStatus();
+      await refreshBalance();
+      if (relayerStatus?.status === 'active') {
+        gasMessage = 'Subscription active.';
+      } else if (relayerStatus) {
+        gasMessage = `Subscription status: ${relayerStatus.status}`;
+      } else {
+        gasMessage = 'Could not reach relayer — check URL and token.';
+      }
+    } finally {
+      gasLoading = false;
+    }
+  }
+
   // Per-folder ACL state
   let folderMembers: Record<string, FolderMember[]> = {};
   let folderMemberError: Record<string, string> = {};
@@ -270,6 +339,99 @@
       {/if}
     </div>
   {/each}
+{/if}
+
+<!-- Chain Token Balance -->
+{#if settings.enabled && hasPasskey && hasDeviceKey}
+  <SettingItemHeading name="Chain Token Balance" />
+
+  {#if cachedBalance !== null}
+    <SettingItem name="Device account balance" description="Chain tokens available to pay transaction fees.">
+      <code style="font-size: 12px;">{formatPlanck(cachedBalance)}</code>
+      <button on:click={refreshBalance} disabled={gasLoading} style="margin-left: 6px;">Refresh</button>
+    </SettingItem>
+  {:else}
+    <SettingItem name="Balance" description="Check how many tokens are available for fees.">
+      <button on:click={refreshBalance} disabled={gasLoading}>Check balance</button>
+    </SettingItem>
+  {/if}
+
+  {#if tier === 'free'}
+    <SettingItemHeading name="Free Tier — Testnet Tokens" />
+    <SettingItem
+      name="Get free tokens"
+      description="Fund your device account from the Westend testnet faucet. One grant per 30 days. No account or payment required."
+    >
+      <button class="mod-cta" disabled={gasLoading || !relayerConfigured} on:click={handleRequestFaucetGrant}>
+        {gasLoading ? 'Requesting…' : 'Get free tokens'}
+      </button>
+    </SettingItem>
+    {#if !relayerConfigured}
+      <div class="setting-item" style="color: var(--text-muted); font-size: 12px;">
+        Set a Relayer URL below to use the free faucet.
+      </div>
+    {/if}
+  {:else}
+    <SettingItemHeading name="Paid Subscription" />
+    <SettingItem name="Verify subscription" description="Check status and seed initial balance.">
+      <button class="mod-cta" disabled={gasLoading} on:click={handleActivatePaid}>
+        {gasLoading ? 'Checking…' : 'Verify'}
+      </button>
+    </SettingItem>
+    {#if relayerStatus}
+      {#if relayerStatus.status === 'active'}
+        <SettingItem name="Status" description={`Period resets ${relayerStatus.periodResetsAt.toLocaleDateString()}`}>
+          <span style="color: var(--color-green);">Active</span>
+        </SettingItem>
+        <SettingItem name="Remaining budget" description="Budget for automatic top-ups this period.">
+          <code style="font-size: 12px;">{formatPlanck(relayerStatus.remainingBudget)}</code>
+        </SettingItem>
+      {:else if relayerStatus.status === 'past_due'}
+        <div class="setting-item mod-warning">Payment past due — update your payment method at the subscription portal.</div>
+      {:else}
+        <div class="setting-item mod-warning">Subscription inactive. Renew to re-enable automatic top-ups.</div>
+      {/if}
+    {/if}
+  {/if}
+
+  {#if gasMessage}
+    <div class="setting-item" style="color: var(--text-muted); font-size: 12px; padding: 4px 0;">{gasMessage}</div>
+  {/if}
+
+  <SettingItemHeading name="Relayer Configuration" />
+
+  <SettingItem name="Relayer URL" description="HTTPS URL of the gas relayer backend (e.g. https://relay.yourdomain.com).">
+    <input type="text" class="text" placeholder="https://relay.yourdomain.com"
+      bind:value={settings.relayerUrl} on:change={save} />
+  </SettingItem>
+
+  <SettingItem
+    name="Subscription token"
+    description="Bearer token from your subscription portal. Leave empty to stay on the free tier."
+  >
+    <input type="password" class="text" placeholder="Leave empty for free tier"
+      bind:value={settings.subscriptionToken} on:change={save} />
+  </SettingItem>
+
+  <SettingItem
+    name="Low balance threshold (WND)"
+    description="Paid top-up triggers when the device account drops below this amount."
+  >
+    <input
+      type="number"
+      class="text"
+      min="0"
+      step="0.1"
+      style="width: 80px;"
+      value={settings.lowBalanceThreshold / 1_000_000_000_000}
+      on:change={(e) => {
+        const wnd = parseFloat((e.target as HTMLInputElement).value) || 0;
+        settings.lowBalanceThreshold = Math.max(0, Math.round(wnd * 1_000_000_000_000));
+        save();
+      }}
+    />
+    <span style="margin-left: 4px; color: var(--text-muted);">WND</span>
+  </SettingItem>
 {/if}
 
 <!-- Passkey Identity -->
