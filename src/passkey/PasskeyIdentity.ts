@@ -94,6 +94,17 @@ export class PasskeyIdentity {
     );
   }
 
+  async signRawBytes(input: Uint8Array): Promise<Uint8Array> {
+    if (!this.settings.deviceKeyEncrypted) throw new Error('No device key configured');
+    const encrypted = Buffer.from(this.settings.deviceKeyEncrypted, 'base64');
+    if (!this.safeStorage) throw new Error('OS secure storage unavailable — cannot decrypt device key');
+    const hex = this.safeStorage.decryptString(encrypted);
+    const deviceSeed = Buffer.from(hex, 'hex');
+    const keyring = new Keyring({ type: 'sr25519' });
+    const pair = keyring.addFromSeed(deviceSeed);
+    return pair.sign(input);
+  }
+
   private async _getMasterSeed(): Promise<Uint8Array> {
     if (!this.settings.credentialId) throw new Error('No passkey registered');
     const credentialId = Buffer.from(this.settings.credentialId, 'base64url');
