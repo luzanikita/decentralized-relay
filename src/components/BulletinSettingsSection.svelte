@@ -6,6 +6,7 @@
   import type { SharedFolder } from "src/SharedFolder";
   import type { JoinRequest } from "src/acl/JoinRequestMonitor";
   import type { FolderMember } from "src/asset-hub/types";
+  import { PublicFaucetClient } from 'src/bulletin/PublicFaucetClient';
 
   export let plugin: Live;
 
@@ -22,12 +23,13 @@
 
   $: tier = settings.subscriptionToken ? 'paid' : 'free';
   $: relayerConfigured = !!settings.relayerUrl;
+  $: networkConfig = PublicFaucetClient.forRpcUrl(settings.rpcUrl);
 
-  function formatPlanck(planck: bigint): string {
-    // WND has 12 decimal places; display with 4 decimal places
-    const whole = planck / 1_000_000_000_000n;
-    const frac = ((planck % 1_000_000_000_000n) * 10000n) / 1_000_000_000_000n;
-    return `${whole}.${frac.toString().padStart(4, '0')} WND`;
+  function formatToken(planck: bigint, symbol: string, decimals: number): string {
+    const divisor = BigInt(10 ** decimals);
+    const whole = planck / divisor;
+    const frac = ((planck % divisor) * 10_000n) / divisor;
+    return `${whole}.${frac.toString().padStart(4, '0')} ${symbol}`;
   }
 
   async function refreshBalance() {
@@ -45,20 +47,38 @@
   }
 
   async function handleRequestFaucetGrant() {
-    if (!plugin.relayerClient) return;
-    const masterAccount = passkeySettings.masterAccountId;
-    if (!masterAccount) { gasMessage = 'Register a passkey first.'; return; }
     gasLoading = true;
     gasMessage = '';
     try {
-      const result = await plugin.relayerClient.requestFaucetGrant(masterAccount, 'bulletin-westend');
-      if (result.ok) {
-        gasMessage = "Account funded — you're ready to use Bulletin Chain persistence.";
-        await refreshBalance();
-      } else if (result.reason === 'rate_limited') {
-        gasMessage = 'Already granted — testnet tokens cover months of usage. Check back in 30 days.';
+      if (plugin.relayerClient) {
+        const masterAccount = passkeySettings.masterAccountId;
+        if (!masterAccount) { gasMessage = 'Register a passkey first.'; return; }
+        const result = await plugin.relayerClient.requestFaucetGrant(masterAccount, 'bulletin-westend');
+        if (result.ok) {
+          gasMessage = "Account funded — you're ready to use Bulletin Chain persistence.";
+          await refreshBalance();
+        } else if (result.reason === 'rate_limited') {
+          gasMessage = 'Already granted — testnet tokens cover months of usage. Check back in 30 days.';
+        } else {
+          gasMessage = 'Faucet unavailable — try again later.';
+        }
       } else {
-        gasMessage = 'Faucet unavailable — try again later.';
+        const deviceAccount = passkeySettings.deviceAccountId;
+        if (!deviceAccount) { gasMessage = 'Register a passkey first.'; return; }
+        const faucetClient = new PublicFaucetClient(
+          deviceAccount,
+          plugin.passkeyIdentity!.signRawBytes.bind(plugin.passkeyIdentity),
+          PublicFaucetClient.forRpcUrl(settings.rpcUrl),
+        );
+        const result = await faucetClient.requestFaucetGrant();
+        if (result.ok) {
+          gasMessage = "Account funded — you're ready to use Bulletin Chain persistence.";
+          await refreshBalance();
+        } else if (result.reason === 'rate_limited') {
+          gasMessage = 'Already funded today — the public faucet allows one grant per day.';
+        } else {
+          gasMessage = 'Faucet unavailable — try again later.';
+        }
       }
     } finally {
       gasLoading = false;
@@ -263,6 +283,10 @@
 
 <SettingItem name="RPC URL" description="WebSocket URL for the bulletin-westend node.">
   <input type="text" class="text" placeholder="wss://..." bind:value={settings.rpcUrl} on:change={save} />
+  <div style="margin-top: 4px; display: flex; gap: 4px;">
+    <button on:click={() => { settings.rpcUrl = 'wss://westend-bulletin-rpc.polkadot.io'; save(); }}>Westend</button>
+    <button on:click={() => { settings.rpcUrl = 'wss://paseo-bulletin-rpc.polkadot.io'; save(); }}>Paseo</button>
+  </div>
 </SettingItem>
 
 <SettingItem name="Asset Hub RPC URL" description="WebSocket URL for the westend Asset Hub node.">
@@ -347,7 +371,7 @@
 
   {#if cachedBalance !== null}
     <SettingItem name="Device account balance" description="Chain tokens available to pay transaction fees.">
-      <code style="font-size: 12px;">{formatPlanck(cachedBalance)}</code>
+      <code style="font-size: 12px;">{formatToken(cachedBalance, networkConfig.symbol, networkConfig.decimals)}</code>
       <button on:click={refreshBalance} disabled={gasLoading} style="margin-left: 6px;">Refresh</button>
     </SettingItem>
   {:else}
@@ -362,15 +386,10 @@
       name="Get free tokens"
       description="Fund your device account from the Westend testnet faucet. One grant per 30 days. No account or payment required."
     >
-      <button class="mod-cta" disabled={gasLoading || !relayerConfigured} on:click={handleRequestFaucetGrant}>
+      <button class="mod-cta" disabled={gasLoading} on:click={handleRequestFaucetGrant}>
         {gasLoading ? 'Requesting…' : 'Get free tokens'}
       </button>
     </SettingItem>
-    {#if !relayerConfigured}
-      <div class="setting-item" style="color: var(--text-muted); font-size: 12px;">
-        Set a Relayer URL below to use the free faucet.
-      </div>
-    {/if}
   {:else}
     <SettingItemHeading name="Paid Subscription" />
     <SettingItem name="Verify subscription" description="Check status and seed initial balance.">
@@ -384,7 +403,7 @@
           <span style="color: var(--color-green);">Active</span>
         </SettingItem>
         <SettingItem name="Remaining budget" description="Budget for automatic top-ups this period.">
-          <code style="font-size: 12px;">{formatPlanck(relayerStatus.remainingBudget)}</code>
+          <code style="font-size: 12px;">{formatToken(relayerStatus.remainingBudget, networkConfig.symbol, networkConfig.decimals)}</code>
         </SettingItem>
       {:else if relayerStatus.status === 'past_due'}
         <div class="setting-item mod-warning">Payment past due — update your payment method at the subscription portal.</div>
