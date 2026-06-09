@@ -303,6 +303,19 @@ classDiagram
 | `src/main.ts` | Added `_buildControlPlane()` private method (returns `BulletinControlPlane` or `RelayControlPlane` based on settings); passes result to `SharedFolder` constructor |
 | `src/BackgroundSync.ts` | Replaced stale `getProviderToken()` call with direct `tokenStore.getToken()` (relay-only download path) |
 
+**Phase 7 — Gas management:**
+
+| File | Change |
+|---|---|
+| `src/bulletin/types.ts` | Added `relayerUrl`, `subscriptionToken`, `lowBalanceThreshold` to `BulletinSettings` + defaults |
+| `src/bulletin/RelayerClient.ts` | **New.** HTTP client for `/faucet-grant`, `/top-up-now`, `/status` — discriminated-union result types; all network errors caught and returned as typed reasons |
+| `src/bulletin/__tests__/relayer-client.test.ts` | **New.** 16 unit tests for `RelayerClient` (all success and failure paths) |
+| `src/bulletin/BulletinClient.ts` | Added `getBalance()`, `checkBalance()`, `onLowBalance(cb)`, `cachedBalance`; optional `relayerClient` + `lowBalanceThreshold` + `tier` constructor params; `store()` hot path untouched |
+| `src/bulletin/__tests__/bulletin-client.test.ts` | +8 tests: `getBalance`, all `checkBalance` branches, `store()` hot-path isolation (total: 19) |
+| `src/main.ts` | Constructs `RelayerClient` when `relayerUrl` is set; passes it to `BulletinClient` with `tier` and `BigInt(lowBalanceThreshold)`; calls `checkBalance()` on startup; nulls `relayerClient` on teardown |
+| `src/components/BulletinSettingsSection.svelte` | Added balance display, free-tier faucet button, paid-subscription status panel, relayer URL + token + threshold fields |
+| `jest.config.js` | Fixed `testPathIgnorePatterns` to allow tests to run inside `.claude/worktrees/` |
+
 **Phase 6 — On-chain membership:**
 
 | File | Change |
@@ -425,11 +438,11 @@ gantt
     JoinRequestMonitor                     :done, 2026-06, 5d
     Per-folder ACL settings UI             :done, 2026-06, 7d
 
-    section Phase 7 — Gas management
-    RelayerClient + BulletinClient balance methods :2026-06, 7d
-    Free-tier faucet grant (one-time registration) :2026-06, 7d
-    Paid subscription auto top-up (low-balance)    :2026-06, 14d
-    Gas management settings UI                    :2026-06, 7d
+    section Phase 7 — Gas management (done)
+    RelayerClient + BulletinClient balance methods :done, 2026-06, 7d
+    Free-tier faucet grant (one-time registration) :done, 2026-06, 7d
+    Paid subscription auto top-up (low-balance)    :done, 2026-06, 14d
+    Gas management settings UI                    :done, 2026-06, 7d
     Relayer backend (Rust/Axum)                   :2026-06, 21d
 ```
 
@@ -606,7 +619,7 @@ sequenceDiagram
 
 `JoinRequestMonitor` silently discards payloads that are not `join-request` shaped, reference an unknown folder, or carry an invalid / expired invite signature. The UI shows a banner per pending request with Approve / Deny buttons.
 
-### Phase 7 — Gas management
+### Phase 7 — Gas management ✓ done
 
 The Bulletin Chain charges a small transaction fee for each `store()` call. Two funding paths coexist; the user never touches crypto either way, and `BulletinClient.store()` always submits directly to the chain RPC regardless of which path is active.
 
@@ -625,7 +638,7 @@ The payment backend's role is narrowly scoped to **account funding only**. It ho
 ```bash
 npm install
 npm run build   # tsc + esbuild (develop profile)
-npm test        # jest unit tests (~129 tests across WebRTC, Bulletin Chain, signaling, passkey, asset-hub, control-plane, ACL, and invite-code layers)
+npm test        # jest unit tests (~183 tests across WebRTC, Bulletin Chain, signaling, passkey, asset-hub, control-plane, ACL, invite-code, and gas management layers)
 ```
 
 The encrypted test files copied from the upstream repo (`__tests__/**` except `src/client/__tests__/`) require the upstream git-crypt key and cannot be run in this fork without it.
