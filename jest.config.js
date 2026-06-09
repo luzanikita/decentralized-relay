@@ -17,7 +17,7 @@ module.exports = {
 		"^multiformats/cid$": "<rootDir>/node_modules/multiformats/dist/src/cid.js",
 		"^multiformats/hashes/digest$": "<rootDir>/node_modules/multiformats/dist/src/hashes/digest.js",
 	},
-	testPathIgnorePatterns: ["/__tests__/mocks/", "/__tests__/merge-hsm/testing/", "archive/", ".claude"],
+	testPathIgnorePatterns: ["/__tests__/mocks/", "/__tests__/merge-hsm/testing/", "archive/", "/\\.claude/(?!worktrees/)"],
     globals: {
         "BUILD_TYPE": "production",
     },
