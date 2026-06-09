@@ -198,3 +198,186 @@ describe('BulletinClient.subscribeToStoredCids()', () => {
   });
 });
 
+// ---- getBalance / checkBalance tests ----
+
+describe('BulletinClient.getBalance()', () => {
+  const mockGetAccount = jest.fn();
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetClient.mockReturnValue(mockPapiClient);
+    mockGetTypedApi.mockReturnValue({
+      tx: { TransactionStorage: mockTxTransactionStorage },
+      query: { System: { Account: { getValue: mockGetAccount } } },
+    });
+    mockGetAccount.mockResolvedValue({ data: { free: 5_000_000_000_000n } });
+  });
+
+  test('returns free balance as bigint', async () => {
+    const client = makeClient();
+    await client.connect();
+    const balance = await client.getBalance();
+    expect(balance).toBe(5_000_000_000_000n);
+    expect(mockGetAccount).toHaveBeenCalledWith('5GTestAddress');
+    client.destroy();
+  });
+
+  test('updates cachedBalance after call', async () => {
+    const client = makeClient();
+    await client.connect();
+    expect(client.cachedBalance).toBeNull();
+    await client.getBalance();
+    expect(client.cachedBalance).toBe(5_000_000_000_000n);
+    client.destroy();
+  });
+});
+
+describe('BulletinClient.checkBalance()', () => {
+  const mockGetAccount = jest.fn();
+  const mockTopUpNow = jest.fn().mockResolvedValue({ ok: true, sent: 3_000_000_000_000n, remainingBudget: 7_000_000_000_000n });
+
+  function setupTypedApi() {
+    mockGetClient.mockReturnValue(mockPapiClient);
+    mockGetTypedApi.mockReturnValue({
+      tx: { TransactionStorage: mockTxTransactionStorage },
+      query: { System: { Account: { getValue: mockGetAccount } } },
+    });
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    setupTypedApi();
+  });
+
+  test('fires topUpNow in background for paid tier with low balance — does not await it', async () => {
+    mockGetAccount.mockResolvedValue({ data: { free: 100n } });
+    const mockRelayer = { topUpNow: mockTopUpNow } as any;
+    const client = new BulletinClient(
+      mockChainConnection as any,
+      signerFactory,
+      'https://ipfs.io/ipfs/',
+      mockRelayer,
+      1_000_000_000_000n,
+      'paid',
+    );
+    await client.connect();
+    await client.checkBalance();
+    // checkBalance returns immediately; topUpNow resolves on the next tick
+    await new Promise((r) => setTimeout(r, 0));
+    expect(mockTopUpNow).toHaveBeenCalledTimes(1);
+    client.destroy();
+  });
+
+  test('emits lowBalance callback for free tier with low balance', async () => {
+    mockGetAccount.mockResolvedValue({ data: { free: 100n } });
+    const client = new BulletinClient(
+      mockChainConnection as any,
+      signerFactory,
+      'https://ipfs.io/ipfs/',
+      undefined,
+      1_000_000_000_000n,
+      'free',
+    );
+    await client.connect();
+    const lowBalanceFired = jest.fn();
+    client.onLowBalance(lowBalanceFired);
+    await client.checkBalance();
+    expect(lowBalanceFired).toHaveBeenCalledTimes(1);
+    client.destroy();
+  });
+
+  test('emits lowBalance for paid tier when no relayerClient is configured', async () => {
+    mockGetAccount.mockResolvedValue({ data: { free: 100n } });
+    const client = new BulletinClient(
+      mockChainConnection as any,
+      signerFactory,
+      'https://ipfs.io/ipfs/',
+      undefined,   // no relayer
+      1_000_000_000_000n,
+      'paid',
+    );
+    await client.connect();
+    const lowBalanceFired = jest.fn();
+    client.onLowBalance(lowBalanceFired);
+    await client.checkBalance();
+    expect(lowBalanceFired).toHaveBeenCalledTimes(1);
+    client.destroy();
+  });
+
+  test('does NOT call topUpNow or emit lowBalance when balance is above threshold', async () => {
+    mockGetAccount.mockResolvedValue({ data: { free: 5_000_000_000_000n } });
+    const mockRelayer = { topUpNow: mockTopUpNow } as any;
+    const client = new BulletinClient(
+      mockChainConnection as any,
+      signerFactory,
+      'https://ipfs.io/ipfs/',
+      mockRelayer,
+      1_000_000_000_000n,
+      'paid',
+    );
+    await client.connect();
+    const lowBalanceFired = jest.fn();
+    client.onLowBalance(lowBalanceFired);
+    await client.checkBalance();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(mockTopUpNow).not.toHaveBeenCalled();
+    expect(lowBalanceFired).not.toHaveBeenCalled();
+    client.destroy();
+  });
+
+  test('onLowBalance unsubscribe stops future notifications', async () => {
+    mockGetAccount.mockResolvedValue({ data: { free: 0n } });
+    const client = new BulletinClient(
+      mockChainConnection as any,
+      signerFactory,
+      'https://ipfs.io/ipfs/',
+      undefined,
+      1_000_000_000_000n,
+      'free',
+    );
+    await client.connect();
+    const lowBalanceFired = jest.fn();
+    const unsub = client.onLowBalance(lowBalanceFired);
+    unsub();
+    await client.checkBalance();
+    expect(lowBalanceFired).not.toHaveBeenCalled();
+    client.destroy();
+  });
+});
+
+describe('BulletinClient.store() — hot path isolation', () => {
+  const mockGetAccount = jest.fn();
+  const mockTopUpNow = jest.fn();
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetClient.mockReturnValue(mockPapiClient);
+    mockGetTypedApi.mockReturnValue({
+      tx: { TransactionStorage: mockTxTransactionStorage },
+      query: { System: { Account: { getValue: mockGetAccount } } },
+    });
+    mockSignSubmitAndWatch.mockReturnValue({
+      subscribe: (h: any) => {
+        h.next({ type: 'txBestBlocksState', found: true });
+        return { unsubscribe: jest.fn() };
+      },
+    });
+  });
+
+  test('store() never calls getBalance or topUpNow', async () => {
+    const mockRelayer = { topUpNow: mockTopUpNow } as any;
+    const client = new BulletinClient(
+      mockChainConnection as any,
+      signerFactory,
+      'https://ipfs.io/ipfs/',
+      mockRelayer,
+      1_000_000_000_000n,
+      'paid',
+    );
+    await client.store(new TextEncoder().encode('hello'));
+    expect(mockGetAccount).not.toHaveBeenCalled();
+    expect(mockTopUpNow).not.toHaveBeenCalled();
+    client.destroy();
+  });
+});
+
