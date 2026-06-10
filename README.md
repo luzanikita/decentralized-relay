@@ -400,7 +400,7 @@ classDiagram
 |---|---|
 | **No transport-level auth** | Room name = `sessionParams.docId` (non-guessable GUID for relay path; blake2 hash for bulletin path). Any peer who learns the docId can join WebRTC. On-chain ACL (Phase 6) verifies membership at session-open time, but WebRTC itself has no server to eject unauthorised peers. |
 | **Read-only not enforced** | WebRTC is symmetric — there is no server to reject writes from read-only clients. `WebRTCProvider` logs a `console.error` when a local write occurs on a read-only token. Full enforcement requires a gated signaling server. |
-| **No encryption** | y-webrtc supports a `password` option (AES-CBC) that is not yet wired up. Until then, informal privacy depends entirely on docId non-guessability. |
+| **No encryption** (Phase 8 in progress) | Snapshots stored on Bulletin Chain / IPFS are currently plaintext. y-webrtc CRDT updates are unencrypted in-flight. Phase 8 adds AES-256-GCM snapshot encryption and wires the y-webrtc `password` option using a per-folder key derived from the passkey and distributed via invite codes. |
 
 ### Protocol gaps
 
@@ -465,6 +465,14 @@ gantt
     Paid subscription auto top-up (low-balance)    :done, 2026-06, 14d
     Gas management settings UI                    :done, 2026-06, 7d
     Relayer backend (Rust/Axum)                   :2026-06, 21d
+
+    section Phase 8 — End-to-end encryption (in progress)
+    FolderCrypto AES-256-GCM primitives            :active, 2026-06, 3d
+    PasskeyIdentity encryption key methods         :active, 2026-06, 3d
+    BulletinCheckpoint encrypt / decrypt           :active, 2026-06, 5d
+    WebRTC password wiring                         :active, 2026-06, 3d
+    InviteCode encryptionKey field                 :active, 2026-06, 2d
+    Migration UI (Enable encryption button)        :active, 2026-06, 3d
 ```
 
 ### Phase 2 — Persistence (Polkadot Bulletin Chain) ✓ done
@@ -651,6 +659,45 @@ The Bulletin Chain charges a small transaction fee for each `store()` call. Two 
 **Paid tier (production):** A flat monthly subscription keeps the device account topped up automatically. When the balance drops below a threshold, the plugin triggers a refill in the background — sync is never blocked. Chain submissions still go directly from the plugin to the chain RPC.
 
 The payment backend's role is narrowly scoped to **account funding only**. It holds no document content, no cryptographic keys, and no signatures. It cannot read or modify sync state. Cancelling a subscription does not lock users out — the device account retains whatever balance remains, and the free tier or direct self-funding are always available as fallbacks.
+
+### Phase 8 — End-to-end encryption (in progress)
+
+Phases 1–7 left note content exposed: snapshots are stored as plaintext on Bulletin Chain / IPFS, and CRDT updates travel unencrypted over WebRTC. Phase 8 closes both gaps with a single per-folder symmetric key.
+
+**Key derivation.** `PasskeyIdentity` derives a 32-byte AES-256 key from the passkey master seed and folder UUID via a second HKDF pass (`info = folderId + ":encryption-v1"`). The key is deterministic — reproducible from a passkey touch alone if settings are lost — and stored encrypted in OS safeStorage alongside the device key.
+
+**Snapshot encryption.** `BulletinCheckpoint` encrypts Yjs state bytes with AES-256-GCM before calling `BulletinClient.store()`. Wire format: `[0x01 version][12-byte nonce][ciphertext + GCM auth tag]`. On `fetchAndApply()`, decryption failure (wrong key, corrupt bytes, pre-Phase 8 CIDs) falls back gracefully — the document loads from peers. `BulletinClient` is unchanged.
+
+**WebRTC encryption.** The same hex key is passed as `password` to y-webrtc's `WebrtcProvider`. y-webrtc internally runs PBKDF2 to derive its AES-CBC working key, so the two layers never share actual key bytes.
+
+**Key distribution.** The key is embedded in invite codes (alongside the existing ACL fields). Members receive it on join and store it in their own safeStorage. Solo owners who never invite anyone derive the key at folder setup time.
+
+*Limitation:* awareness messages (cursor positions, presence) are not encrypted — y-webrtc does not support this. Historical plaintext snapshots already on IPFS cannot be removed.
+
+---
+
+## Future work
+
+### Relayer backend (Rust/Axum)
+The plugin's `RelayerClient` is fully implemented with `/faucet-grant`, `/top-up-now`, and `/status` endpoints. The paid subscription tier is non-functional until the backend ships. Planned stack: Rust + Axum, Stripe webhooks, Postgres, per-account balance top-up via chain RPC.
+
+### Folder discovery
+After Alice approves Bob's join request (adding his proxy on Asset Hub), Bob has no automated way to get the folder into his vault. The invite code carries only ACL metadata — folder name, vault path, and plugin settings must arrive out-of-band. A follow-up UX spec will cover embedding this in the invite code and/or a lightweight rendezvous endpoint.
+
+### Invite delivery via rendezvous endpoint
+Invite codes are currently copy-pasted manually. A short-lived rendezvous endpoint (POST invite → short code, recipient polls or receives push notification) would remove manual transfer.
+
+### Multi-device management
+`PasskeyIdentity.addDevice()` — register a new laptop by touching the passkey on any existing registered device (signs `add_proxy` for the new device key). Currently a new device requires full re-setup.
+
+### Revocation and device management UI
+`AssetHubClient.removeProxy` exists but there is no UI to list registered device keys or revoke one. A future settings panel would query Asset Hub for all proxy entries and allow per-device revocation from any registered device.
+
+### JoinRequestMonitor auto-approve
+Today every join request requires manual approval. A pre-signed allowlist (Bob's master account ID) would let Alice auto-approve known contacts without a UI interaction.
+
+### Read-only enforcement
+WebRTC is symmetric — there is no server to reject writes from read-only members. `WebRTCProvider` only logs a `console.error` on local writes. Full enforcement requires a gated signaling server or a custom pallet.
 
 ---
 
